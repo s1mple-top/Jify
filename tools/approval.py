@@ -32,6 +32,7 @@ _approval_active = False
 _approval_queue: queue.Queue = queue.Queue()
 _consumer_started = False
 _consumer_lock = threading.Lock()
+termios_lock = threading.Lock()  # 保护所有 tcgetattr/tcsetattr 操作，防止 ESC 监听器与审批的终端模式切换竞态
 
 def set_approval_engine(engine: OutputEngine) -> None:
     global _engine
@@ -158,15 +159,17 @@ def _read_approval_choice(tool_name: str, timeout: float = 120.0) -> bool:
 
     _approval_active = True
     fd = sys.stdin.fileno()
-    _saved_tcattr = termios.tcgetattr(fd)
+    with termios_lock:
+        _saved_tcattr = termios.tcgetattr(fd)
     try:
         # 先排空所有待输出内容，确保 Panel / prompt 已传输到终端
         sys.stdout.flush()
-        _canonical = termios.tcgetattr(fd)
-        _canonical[3] |= termios.ECHO | termios.ICANON
-        # TCSANOW 立即切换模式（不等输出排空），紧接 TCIFLUSH 清残余 raw 输入。
-        # 避免 TCSAFLUSH 的输出排空窗口内用户 Enter 被当作 raw 字节刷掉。
-        termios.tcsetattr(fd, termios.TCSANOW, _canonical)
+        with termios_lock:
+            _canonical = termios.tcgetattr(fd)
+            _canonical[3] |= termios.ECHO | termios.ICANON
+            # TCSANOW 立即切换模式（不等输出排空），紧接 TCIFLUSH 清残余 raw 输入。
+            # 避免 TCSAFLUSH 的输出排空窗口内用户 Enter 被当作 raw 字节刷掉。
+            termios.tcsetattr(fd, termios.TCSANOW, _canonical)
         termios.tcflush(fd, termios.TCIFLUSH)
 
         while True:
@@ -213,7 +216,8 @@ def _read_approval_choice(tool_name: str, timeout: float = 120.0) -> bool:
                 raise ApprovalBreak(tool_name)
             print("  无效输入，请按回车批准 / n(拒绝) / b(中断)")
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, _saved_tcattr)
+        with termios_lock:
+            termios.tcsetattr(fd, termios.TCSADRAIN, _saved_tcattr)
         _approval_active = False
 
 
