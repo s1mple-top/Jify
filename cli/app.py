@@ -11,11 +11,9 @@ import random
 import re
 import select
 import signal
-import termios
 import textwrap
 import threading
 import sys
-import tty
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -41,6 +39,7 @@ from agent_p2p import (
     build_prompt_from_message, set_post_handler_callback,
 )
 from output_engine import JifyTheme
+from tools.approval import termios_lock
 from cli.console import CLIConsole
 from .bootstrap import ensure_jify_home
 
@@ -166,6 +165,7 @@ _INFRA_TOOLS = {
 }
 
 # P2P 可用名称列表（每次启动随机选取，无需文件持久化，crash 安全）
+
 P2P_AGENT_NAMES = [
     "Jify_Alice", "Jify_Bob", "Jify_Charlie", "Jify_David",
     "Jify_Eva", "Jify_Frank", "Jify_Grace", "Jify_Henry",
@@ -546,24 +546,22 @@ class JifyCLI:
             pass
 
     def _start_esc_listener(self) -> None:
-        """后台线程：cbreak 模式监听 ESC 按键，触发中断"""
+
         if self._esc_thread and self._esc_thread.is_alive():
             return
 
         self._esc_stop.clear()
         cli = self
 
-        try:
-            saved_attr = termios.tcgetattr(sys.stdin)
-        except termios.error:
-            return
-
-        # 保存到实例属性，供 _stop_esc_listener 显式恢复
-        self._esc_saved_attr = saved_attr
-
         def _listen() -> None:
+            import termios
+            import tty
+            fd = sys.stdin.fileno()
+            with termios_lock:
+                old_attrs = termios.tcgetattr(fd)
             try:
-                tty.setcbreak(sys.stdin)
+                with termios_lock:
+                    tty.setcbreak(fd) # 修改为cbreak，cooked会缓冲
                 while not cli._esc_stop.is_set():
                     from tools.approval import is_approval_active
                     # 暂停监听 0.15 秒，避免审批期间按 ESC 误触发中断
@@ -582,35 +580,21 @@ class JifyCLI:
             except Exception:
                 pass
             finally:
-                # 仅当主线程尚未恢复时才恢复终端属性，避免覆盖 prompt_toolkit 的设置
-                if saved_attr is not None and cli._esc_saved_attr is not None:
-                    try:
-                        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, saved_attr)
-                    except Exception:
-                        pass
+                with termios_lock:
+                    termios.tcsetattr(fd, termios.TCSAFLUSH, old_attrs)
 
         self._esc_thread = threading.Thread(target=_listen, daemon=True)
         self._esc_thread.start()
 
     def _stop_esc_listener(self) -> None:
-        """终止 ESC 监听线程，并由主线程显式恢复终端属性。
+        """终止 ESC 监听线程。
 
-        主线程显式恢复终端是必要的：daemon 线程的 finally 块可能在
-        prompt_toolkit 接管终端之后才执行，导致竞态。
+        _esc_stop 事件通知线程退出循环，线程在 finally 块中恢复终端属性。
         """
         self._esc_stop.set()
         if self._esc_thread and self._esc_thread.is_alive():
             self._esc_thread.join(timeout=2.0)
         self._esc_thread = None
-
-        # 主线程显式恢复终端，确保 prompt_toolkit 拿到稳定的一致状态
-        saved = getattr(self, '_esc_saved_attr', None)
-        if saved is not None:
-            try:
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, saved)
-            except Exception:
-                pass
-            self._esc_saved_attr = None
 
     def _build_tools(self, reg) -> None:
         """从 registry 重建工具 schema 列表，线程安全。"""
