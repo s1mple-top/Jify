@@ -34,6 +34,9 @@ jify -q "帮我分析当前目录的项目结构"
 
 # 启动 Web UI 
 jify gateway --port 9090
+
+# 开启think流式输出，增强使用体感
+jify --think-stream
 ```
 
 首次运行会自动创建 `~/.jify/` 目录并生成默认配置。
