@@ -160,13 +160,12 @@ _cli_session = PromptSession(
 # 基础架构 / 协调工具：不应被自进化视为用户偏好
 _INFRA_TOOLS = {
     "team_delegate", "team_delegate_parallel", "team_broadcast",
-    "team_add_worker", "team_status", "subagent_run",
+    "team_add_worker", "team_remove_worker", "team_status", "subagent_run",
     "update_todos", "mcp_reload", "mcp_list",
     "load_skill", "skill_create",
 }
 
 # P2P 可用名称列表（每次启动随机选取，无需文件持久化，crash 安全）
-
 P2P_AGENT_NAMES = [
     "Jify_Alice", "Jify_Bob", "Jify_Charlie", "Jify_David",
     "Jify_Eva", "Jify_Frank", "Jify_Grace", "Jify_Henry",
