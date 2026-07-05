@@ -1,0 +1,9 @@
+{
+    "name": "wiki_search",
+    "version": "1.0.0",
+    "author": "Jify",
+    "tags": ["wikipedia", "api", "search", "information"],
+    "parallel_safe": true,
+    "timeout": 5,
+    "description": "使用维基百科API搜索词条信息并返回结构化结果，支持中英文版本"
+}

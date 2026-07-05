@@ -1,0 +1,81 @@
+name: code_audit
+version: "1.0"
+description: "对指定代码文件做静态分析 + LLM 审查，生成审查报告"
+
+parameters:
+  - name: target_file
+    type: string
+    required: true
+    description: "要审查的 Python 文件路径"
+
+steps:
+  - id: read
+    tool: read_file
+    args:
+      path: "{{ parameters.target_file }}"
+
+
+  - id: static
+    tool: static_analysis
+    args:
+      path: "{{ parameters.target_file }}"
+      check_unused_imports: true
+      check_unused_variables: true
+      check_syntax: true
+      check_complexity: true
+      check_dead_code: true
+    depends_on:
+      - read
+
+
+  # Step 3: LLM 审查（依赖 read + static）
+  - id: review
+    use: llm
+    prompt: |
+      你是一位资深代码审查专家。请审查以下代码文件，指出潜在问题并给出改进建议。
+
+      ## 文件路径
+      {{ parameters.target_file }}
+
+      ## 源代码
+      ```
+      {{ steps.read.output }}
+      ```
+
+      ## 静态分析结果
+      {{ steps.static.output }}
+
+      ## 要求
+      1. 指出代码中的 bug、逻辑错误或设计问题
+      2. 指出不符合最佳实践的地方
+      3. 给出具体的改进建议
+      4. 按严重程度排序（严重 → 一般 → 建议）
+      5. 输出格式使用 Markdown
+    depends_on:
+      - read
+      - static
+
+  # Step 4: 写入报告（依赖 review）
+  - id: write_report
+    tool: write_file
+    args:
+      path: "audit_report_{{ parameters.target_file | basename }}.md"
+      content: |
+        # 代码审查报告
+
+        **文件**: `{{ parameters.target_file }}`
+        **审查时间**: 自动生成
+        **工具**: Jify Workflow — code_audit v{{ workflow.version }}
+
+        ---
+
+        {{ steps.review.output }}
+    depends_on:
+      - review
+
+# ------------------------------------------------------------------
+# 最终输出
+# ------------------------------------------------------------------
+output:
+  report: "audit_report_{{ parameters.target_file | basename }}.md"
+  summary: "{{ steps.static.output | trim }}"

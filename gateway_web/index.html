@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jify</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>marked.setOptions({ breaks: true });</script>
+<style>
+/* ── Reset & Base ── */
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+  background: #faf7f2;
+  color: #3d3929;
+  height: 100vh;
+  display: flex;
+}
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d4c5a9; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #b45309; }
+
+/* ── Sidebar ── */
+#sidebar {
+  width: 240px;
+  background: linear-gradient(180deg, #fef9f0 0%, #faf3e6 100%);
+  border-right: 1px solid #e8ddcc;
+  display: flex; flex-direction: column;
+  padding: 20px 16px;
+  flex-shrink: 0;
+}
+#sidebar h2 {
+  color: #92400e;
+  font-size: 18px; font-weight: 700;
+  letter-spacing: -0.3px;
+  margin-bottom: 8px;
+}
+#sidebar .subtitle {
+  font-size: 11px; color: #a0907a;
+  margin-bottom: 24px;
+}
+#sidebar .info-block {
+  font-size: 11px; color: #8b7355;
+  line-height: 1.6;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #e8ddcc;
+  border-radius: 10px;
+  margin-bottom: 14px;
+  cursor: pointer; user-select: none;
+  transition: all .15s;
+}
+#sidebar .info-block:hover { background: #fdf0dd; border-color: #d4c5a9; }
+#sidebar .info-block.active {
+  background: linear-gradient(135deg, #b45309, #c45d1d);
+  color: #fff;
+  border-color: #b45309;
+}
+#sidebar .info-block.active .label { color: #fff; }
+#sidebar .info-block .label { font-weight: 600; color: #b45309; }
+#skills-list { margin-top: 4px; font-size: 11px; line-height: 1.7; }
+#skills-list .skill-item { color: #8b7355; }
+#sidebar .info-block.active #skills-list .skill-item { color: rgba(255,255,255,.8); }
+#plugin-list { margin-top: 4px; font-size: 11px; line-height: 1.7; }
+#plugin-list .plugin-item { color: #8b7355; }
+#sidebar .info-block.active #plugin-list .plugin-item { color: rgba(255,255,255,.8); }
+#config-summary { margin-top: 4px; font-size: 11px; color: #8b7355; }
+#sidebar .info-block.active #config-summary { color: rgba(255,255,255,.8); }
+
+/* Skills Panel */
+#skills-panel {
+  display: none; flex: 1; overflow-y: auto;
+  padding: 24px 32px;
+  flex-direction: column;
+}
+#skills-panel.visible { display: flex; }
+#skills-panel h3 {
+  color: #92400e; font-size: 18px; font-weight: 700;
+  margin-bottom: 20px;
+}
+.skill-card {
+  background: #fff;
+  border: 1px solid #e8ddcc;
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.02);
+  transition: all .15s;
+}
+.skill-card:hover { border-color: #b45309; box-shadow: 0 2px 12px rgba(180,83,9,.06); }
+.skill-card .skill-name {
+  color: #b45309; font-weight: 700; font-size: 14px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  margin-bottom: 6px;
+}
+.skill-card .skill-desc {
+  color: #8b7355; font-size: 13px; line-height: 1.6;
+}
+
+/* Plugins Panel */
+#plugins-panel {
+  display: none; flex: 1; overflow-y: auto;
+  padding: 24px 32px;
+  flex-direction: column;
+}
+#plugins-panel.visible { display: flex; }
+#plugins-panel h3 {
+  color: #92400e; font-size: 18px; font-weight: 700;
+  margin-bottom: 20px;
+}
+.plugin-card {
+  background: #fff;
+  border: 1px solid #e8ddcc;
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.02);
+  transition: all .15s;
+}
+.plugin-card:hover { border-color: #b45309; box-shadow: 0 2px 12px rgba(180,83,9,.06); }
+.plugin-card .plugin-name {
+  color: #b45309; font-weight: 700; font-size: 14px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  margin-bottom: 6px;
+}
+.plugin-card .plugin-meta {
+  font-size: 11px; color: #a0907a; margin-bottom: 6px;
+}
+.plugin-card .plugin-meta .tag {
+  display: inline-block;
+  background: #fefce8; color: #854d0e;
+  border: 1px solid #fef0c0;
+  padding: 1px 8px; border-radius: 4px;
+  margin-right: 4px; font-size: 10px; font-weight: 600;
+}
+.plugin-card .plugin-desc {
+  color: #8b7355; font-size: 13px; line-height: 1.6;
+}
+
+/* Config Panel */
+#config-panel {
+  display: none; flex: 1; overflow-y: auto;
+  padding: 24px 32px;
+  flex-direction: column;
+}
+#config-panel.visible { display: flex; }
+#config-panel h3 {
+  color: #92400e; font-size: 18px; font-weight: 700;
+  margin-bottom: 20px;
+}
+.config-form {
+  max-width: 560px;
+}
+.config-group {
+  margin-bottom: 14px;
+}
+.config-group label {
+  display: block;
+  font-size: 12px; color: #8b7355;
+  margin-bottom: 4px; font-weight: 600;
+}
+.config-group input, .config-group textarea {
+  width: 100%;
+  background: #fff;
+  border: 1px solid #d4c5a9;
+  color: #3d3929;
+  padding: 8px 12px; border-radius: 8px;
+  font-size: 13px; outline: none;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  transition: border-color .15s, box-shadow .15s;
+}
+.config-group input:focus, .config-group textarea:focus {
+  border-color: #b45309;
+  box-shadow: 0 0 0 3px rgba(180,83,9,.06);
+}
+.config-group textarea {
+  resize: vertical; min-height: 60px;
+  font-size: 12px;
+}
+.config-group .hint {
+  font-size: 10px; color: #a0907a;
+  margin-top: 2px;
+}
+.config-save-btn {
+  background: linear-gradient(135deg, #b45309, #c45d1d);
+  color: #fff; border: none;
+  padding: 10px 28px; border-radius: 10px;
+  cursor: pointer; font-size: 14px; font-weight: 600;
+  transition: all .15s;
+  box-shadow: 0 2px 8px rgba(180,83,9,.2);
+  margin-top: 8px;
+}
+.config-save-btn:hover {
+  background: linear-gradient(135deg, #a0470a, #b45309);
+  box-shadow: 0 4px 14px rgba(180,83,9,.3);
+  transform: translateY(-1px);
+}
+.config-save-btn:disabled {
+  background: #e8ddcc; color: #a0907a;
+  cursor: not-allowed; box-shadow: none; transform: none;
+}
+.config-save-msg {
+  display: inline-block; margin-left: 12px;
+  font-size: 13px; vertical-align: middle;
+}
+
+/* Chat view wrapper */
+#chat-view { flex:1; display:flex; flex-direction:column; min-width:0; min-height:0; }
+#chat-view.hidden { display: none; }
+#logout-btn {
+  margin-top: auto;
+  background: #faf3e6; color: #b45309;
+  border: 1px solid #d4c5a9;
+  padding: 10px; border-radius: 10px;
+  cursor: pointer; font-size: 13px; font-weight: 600;
+  transition: all .15s;
+}
+#logout-btn:hover { background: #fef0e0; border-color: #b45309; }
+
+/* ── Main Area ── */
+#main { flex:1; display:flex; flex-direction:column; min-width:0; background:#fdf8f1; }
+
+/* Header */
+#header {
+  padding: 14px 24px;
+  border-bottom: 1px solid #e8ddcc;
+  background: #fef9f0;
+  font-size: 13px; color: #8b7355;
+  display: flex; justify-content: space-between; align-items: center;
+}
+#header strong { color: #b45309; font-weight: 600; }
+
+/* Status Bar */
+#status-bar {
+  margin: 0 20px;
+  padding: 8px 16px;
+  background: #faf5ed;
+  border: 1px solid #e8ddcc; border-top: none;
+  border-radius: 0 0 12px 12px;
+  font-size: 12px; color: #8b7355;
+  display: flex; align-items: center; gap: 10px;
+  min-height: 36px;
+  transition: all .2s;
+}
+#status-bar .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%; flex-shrink: 0;
+}
+#status-bar.idle .dot { background: #a3a3a3; }
+#status-bar.thinking .dot { background: #f59e0b; animation: pulse 1s infinite; box-shadow: 0 0 8px rgba(245,158,11,.4); }
+#status-bar.compressing .dot { background: #eab308; animation: pulse .6s infinite; }
+@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.8)} }
+
+/* ── Chat Area ── */
+#chat {
+  flex: 1; overflow-y: auto;
+  padding: 24px 24px 8px;
+  scroll-behavior: smooth;
+}
+#chat .empty-state {
+  text-align: center; padding: 60px 20px;
+  color: #a0907a;
+}
+#chat .empty-state .big-icon { font-size: 48px; margin-bottom: 12px; }
+#chat .empty-state h3 { font-size: 16px; color: #8b7355; margin-bottom: 4px; }
+#chat .empty-state p { font-size: 13px; }
+
+/* ── Messages ── */
+.msg { margin-bottom: 14px; animation: fadeIn .25s; display: flex; align-items: flex-start; gap: 10px; }
+@keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+
+.msg-user { flex-direction: row-reverse; }
+.msg-avatar {
+  width: 34px; height: 34px;
+  border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+}
+.msg-user .msg-avatar {
+  background: linear-gradient(135deg, #b45309, #d97706);
+  color: #fff;
+  font-weight: 700;
+}
+.msg-assistant .msg-avatar {
+  background: linear-gradient(135deg, #fbbf24, #f59e0b);
+  box-shadow: 0 2px 8px rgba(245,158,11,.25);
+}
+
+/* Bubbles */
+.msg-user .bubble {
+  background: linear-gradient(135deg, #b45309, #c45d1d);
+  color: #fff;
+  border-radius: 16px 16px 4px 16px;
+  padding: 10px 16px;
+  max-width: 68%;
+  word-wrap: break-word; font-size: 14px; line-height: 1.65;
+  box-shadow: 0 2px 12px rgba(180,83,9,.15);
+}
+.msg-assistant .bubble {
+  background: #fff;
+  border: 1px solid #e8ddcc;
+  border-radius: 4px 16px 16px 16px;
+  padding: 14px 18px;
+  max-width: 76%;
+  word-wrap: break-word; font-size: 14px; line-height: 1.7;
+  color: #4a4235;
+  box-shadow: 0 1px 4px rgba(0,0,0,.03), 0 2px 8px rgba(0,0,0,.02);
+}
+.msg-system .bubble {
+  background: #faf5ed; border: 1px dashed #d4c5a9;
+  color: #8b7355; font-size: 12px; text-align: center;
+  margin: 0 auto; max-width: 80%;
+}
+
+/* Content styles */
+.msg-assistant .bubble .content { white-space: normal; }
+.msg-assistant .bubble .content p { margin: 0; }
+.msg-assistant .bubble .content p + p { margin-top: 8px; }
+.msg-assistant .bubble .content ul, .msg-assistant .bubble .content ol { padding-left: 20px; margin: 6px 0; }
+.msg-assistant .bubble .content li { margin-bottom: 4px; }
+.msg-assistant .bubble .content strong, .msg-assistant .bubble .content b { color: #92400e; }
+.msg-assistant .bubble .content em { color: #8b7355; }
+.msg-assistant .bubble .content code {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 12.5px;
+  background: #fefce8; color: #b45309;
+  padding: 2px 6px; border-radius: 4px;
+  border: 1px solid #fef0c0;
+}
+.msg-assistant .bubble .content pre {
+  background: #faf5ed; border: 1px solid #e8ddcc;
+  border-radius: 8px; padding: 14px 16px;
+  overflow-x: auto; margin: 10px 0;
+  font-size: 13px; color: #4a4235; line-height: 1.5;
+}
+.msg-assistant .bubble .content pre code {
+  background: none; border: none; padding: 0;
+  font-size: 13px; color: inherit;
+}
+.msg-assistant .bubble .content blockquote {
+  border-left: 3px solid #e8ddcc;
+  padding: 4px 0 4px 14px;
+  margin: 8px 0; color: #8b7355;
+}
+.msg-assistant .bubble .content hr { border: none; border-top: 1px solid #e8ddcc; margin: 12px 0; }
+.msg-assistant .bubble .content h2, .msg-assistant .bubble .content h3 {
+  color: #92400e; margin: 14px 0 6px;
+}
+.msg-assistant .bubble .content h2 { font-size: 16px; }
+.msg-assistant .bubble .content h3 { font-size: 14px; }
+
+/* Thinking section */
+.msg-assistant .bubble .think-text {
+  font-size: 12px; color: #a0907a; font-style: italic;
+  padding-bottom: 8px; margin-bottom: 8px;
+  border-bottom: 1px dashed #e8ddcc;
+  white-space: pre-wrap;
+}
+.msg-assistant .bubble .think-text:empty { display: none; }
+
+/* Tool messages */
+.tool-msg {
+  margin: 8px 0 8px 54px;
+  padding: 8px 14px;
+  background: #fefce8;
+  border-left: 3px solid #eab308;
+  border-radius: 0 8px 8px 0;
+  font-size: 12px; color: #854d0e;
+  max-width: 68%;
+}
+.tool-msg .tool-name { color: #b45309; font-weight: 600; }
+.tool-msg .result {
+  display: block; margin-top: 2px;
+  font-family: 'SF Mono', monospace; font-size: 11px;
+  white-space: pre-wrap; word-break: break-all;
+  color: #78716c; max-height: 120px; overflow-y: auto;
+}
+.tool-msg .result:empty::after { content: '执行中...'; color: #a0907a; }
+
+/* Thinking indicator */
+.think-indicator {
+  margin: 8px 0 8px 54px;
+  padding: 6px 14px;
+  font-size: 12px; color: #a0907a;
+  display: flex; align-items: center; gap: 6px;
+}
+.think-indicator .dots { display: flex; gap: 3px; }
+.think-indicator .dots span {
+  width: 4px; height: 4px;
+  border-radius: 50%; background: #d4c5a9;
+  animation: dotBounce 1.4s infinite;
+}
+.think-indicator .dots span:nth-child(2) { animation-delay: .2s; }
+.think-indicator .dots span:nth-child(3) { animation-delay: .4s; }
+@keyframes dotBounce { 0%,80%,100%{transform:scale(.6);opacity:.5} 40%{transform:scale(1.2);opacity:1} }
+
+/* Streaming highlight */
+.streaming .bubble {
+  border-color: #b45309 !important;
+  box-shadow: 0 0 0 3px rgba(180,83,9,.06), 0 2px 12px rgba(180,83,9,.08) !important;
+}
+
+/* ── Input Area ── */
+#input-area {
+  padding: 14px 20px;
+  border-top: 1px solid #e8ddcc;
+  background: linear-gradient(0deg, #fef9f0, #fdf8f1);
+  display: flex; gap: 10px; align-items: flex-end;
+}
+#input-area textarea {
+  flex: 1;
+  background: #fff;
+  border: 1px solid #d4c5a9;
+  color: #3d3929;
+  padding: 10px 16px;
+  border-radius: 12px;
+  font-size: 14px; resize: none; outline: none;
+  min-height: 44px; max-height: 140px;
+  font-family: inherit; line-height: 1.6;
+  transition: border-color .15s, box-shadow .15s;
+}
+#input-area textarea:focus {
+  border-color: #b45309;
+  box-shadow: 0 0 0 4px rgba(180,83,9,.06);
+}
+#input-area button {
+  background: linear-gradient(135deg, #b45309, #c45d1d);
+  color: #fff; border: none;
+  padding: 11px 22px; border-radius: 12px;
+  cursor: pointer; font-size: 14px; font-weight: 600;
+  white-space: nowrap;
+  transition: all .15s;
+  box-shadow: 0 2px 8px rgba(180,83,9,.2);
+}
+#input-area button:hover {
+  background: linear-gradient(135deg, #a0470a, #b45309);
+  box-shadow: 0 4px 14px rgba(180,83,9,.3);
+  transform: translateY(-1px);
+}
+#input-area button:disabled {
+  background: #e8ddcc; color: #a0907a;
+  cursor: not-allowed; box-shadow: none;
+  transform: none;
+}
+#stop-btn {
+  background: #fff;
+  color: #dc2626;
+  border: 1px solid #fca5a5;
+  padding: 11px 22px; border-radius: 12px;
+  cursor: pointer; font-size: 14px; font-weight: 600;
+  display: none; align-items: center; justify-content: center;
+  transition: all .15s;
+}
+#stop-btn:hover {
+  background: #fef2f2; border-color: #dc2626;
+  box-shadow: 0 2px 8px rgba(220,38,38,.12);
+  transform: translateY(-1px);
+}
+#stop-btn:active {
+  background: #fee2e2; transform: scale(.95);
+}
+#stop-btn:disabled {
+  background: #e8ddcc; color: #a0907a;
+  cursor: not-allowed; box-shadow: none; border-color: #d4c5a9;
+  transform: none;
+}
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h2>&#9889; Jify </h2>
+  <div class="subtitle">交互式编程助手</div>
+  <div class="info-block active" id="nav-chat" onclick="switchView('chat')">聊天</div>
+  <div class="info-block" id="skills-block" onclick="switchView('skills')">
+    <div class="label">Skills</div>
+    <div id="skills-list">加载中...</div>
+  </div>
+  <div class="info-block" id="plugins-block" onclick="switchView('plugins')">
+    <div class="label">插件</div>
+    <div id="plugin-list">加载中...</div>
+  </div>
+  <div class="info-block" id="config-block" onclick="switchView('config')">
+    <div class="label">配置</div>
+    <div id="config-summary">加载中...</div>
+  </div>
+  <button id="logout-btn" onclick="logout()">退出登录</button>
+</div>
+<div id="main">
+  <div id="chat-view">
+    <div id="header">
+      <div>&#20250;&#35805; &#183; <strong id="current-user">&mdash;</strong></div>
+    </div>
+    <div id="status-bar" class="idle"><span class="dot"></span><span id="status-text">&#23601;&#32490;</span></div>
+    <div id="chat">
+      <div class="empty-state">
+        <div class="big-icon">&#9889;</div>
+        <h3>Jify &#24050;&#23601;&#32490;</h3>
+        <p>&#25105;&#33021;&#24110;&#20320;&#20570;&#20160;&#20040;?</p>
+      </div>
+    </div>
+    <div id="input-area">
+      <textarea id="msg-input" placeholder="&#36755;&#20837;&#28040;&#24687;... (Enter &#21457;&#36865;, Shift+Enter &#25442;&#34892;)" rows="1"></textarea>
+      <button id="stop-btn" title="&#20013;&#26029;&#24403;&#21069;&#20132;&#20114;">&#20572;&#27490;</button>
+      <button id="send-btn">&#21457;&#36865;</button>
+    </div>
+  </div>
+  <div id="skills-panel">
+    <h3>&#24050;&#21152;&#36733;&#30340; Skills</h3>
+    <div id="skills-detail"></div>
+  </div>
+  <div id="plugins-panel">
+    <h3>已加载的插件</h3>
+    <div id="plugins-detail"></div>
+  </div>
+  <div id="config-panel">
+    <h3>Jify 配置</h3>
+    <div class="config-form" id="config-form"></div>
+    <div style="margin-top:16px;">
+      <button class="config-save-btn" id="config-save-btn" onclick="saveConfig()">保存配置</button>
+      <span class="config-save-msg" id="config-save-msg"></span>
+    </div>
+  </div>
+</div>
+<script>
+(function() {
+  var token = sessionStorage.getItem('jify_token');
+  var userId = sessionStorage.getItem('jify_user_id');
+  var username = sessionStorage.getItem('jify_username');
+
+  if (!token || !userId) {
+    window.location.href = '/';
+    return;
+  }
+
+  document.getElementById('current-user').textContent = username;
+
+  var skillsData = [];
+  var pluginsData = [];
+  var configData = {};
+
+  // 加载 skills 列表
+  fetch('/api/skills')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var list = document.getElementById('skills-list');
+      skillsData = data.skills || [];
+      if (skillsData.length) {
+        list.innerHTML = skillsData.map(function(s) {
+          return '<div class="skill-item">- ' + esc(s.name) + '</div>';
+        }).join('');
+        renderSkillsPanel();
+      } else {
+        list.textContent = '无';
+      }
+    })
+    .catch(function() {
+      document.getElementById('skills-list').textContent = '加载失败';
+    });
+
+  // 加载插件列表
+  fetch('/api/plugins')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var list = document.getElementById('plugin-list');
+      pluginsData = data.plugins || [];
+      if (pluginsData.length) {
+        list.innerHTML = pluginsData.map(function(p) {
+          var badge = p.loaded ? '' : ' <span style="color:#a0907a;font-size:9px;">(未加载)</span>';
+          return '<div class="plugin-item">- ' + esc(p.name) + badge + '</div>';
+        }).join('');
+        renderPluginsPanel();
+      } else {
+        list.textContent = '无';
+      }
+    })
+    .catch(function() {
+      document.getElementById('plugin-list').textContent = '加载失败';
+    });
+
+  // 加载配置
+  fetch('/api/config')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      configData = data.config || {};
+      var summary = document.getElementById('config-summary');
+      var provider = configData.provider || '-';
+      var model = configData.model || '-';
+      summary.textContent = provider + ' / ' + model;
+      renderConfigPanel();
+    })
+    .catch(function() {
+      document.getElementById('config-summary').textContent = '加载失败';
+    });
+
+  window.logout = function() {
+    var token = sessionStorage.getItem('token');
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/logout?token=' + encodeURIComponent(token || ''), true);
+    xhr.onload = function() {
+      sessionStorage.clear();
+      window.location.href = '/';
+    };
+    xhr.onerror = function() {
+      sessionStorage.clear();
+      window.location.href = '/';
+    };
+    xhr.send();
+  };
+
+  window.switchView = function(view) {
+    var blocks = {
+      'chat': 'nav-chat',
+      'skills': 'skills-block',
+      'plugins': 'plugins-block',
+      'config': 'config-block'
+    };
+    var activeId = blocks[view] || 'nav-chat';
+    // reset all
+    ['nav-chat', 'skills-block', 'plugins-block', 'config-block'].forEach(function(id) {
+      document.getElementById(id).classList.remove('active');
+    });
+    document.getElementById(activeId).classList.add('active');
+    // panels
+    document.getElementById('chat-view').classList.toggle('hidden', view !== 'chat');
+    document.getElementById('skills-panel').classList.toggle('visible', view === 'skills');
+    document.getElementById('plugins-panel').classList.toggle('visible', view === 'plugins');
+    document.getElementById('config-panel').classList.toggle('visible', view === 'config');
+    if (view === 'skills') renderSkillsPanel();
+    if (view === 'plugins') renderPluginsPanel();
+    if (view === 'config') renderConfigPanel();
+  };
+
+  function renderSkillsPanel() {
+    var detail = document.getElementById('skills-detail');
+    if (!skillsData.length) {
+      detail.innerHTML = '<p style="color:#a0907a;text-align:center;padding:40px;">暂无已加载的 skill</p>';
+      return;
+    }
+    detail.innerHTML = skillsData.map(function(s) {
+      return '<div class="skill-card"><div class="skill-name">' + esc(s.name) + '</div><div class="skill-desc">' + esc(s.description || '无描述') + '</div></div>';
+    }).join('');
+  }
+
+  function renderPluginsPanel() {
+    var detail = document.getElementById('plugins-detail');
+    if (!pluginsData.length) {
+      detail.innerHTML = '<p style="color:#a0907a;text-align:center;padding:40px;">暂无已发现的插件</p>';
+      return;
+    }
+    detail.innerHTML = pluginsData.map(function(p) {
+      var tags = p.type.map(function(t) { return '<span class="tag">' + esc(t) + '</span>'; }).join('');
+      var meta = 'v' + esc(p.version) + ' &middot; ' + esc(p.directory);
+      var statusBadge = p.loaded
+        ? ' <span style="color:#16a34a;font-size:10px;font-weight:600;">已加载</span>'
+        : (p.error ? ' <span style="color:#dc2626;font-size:10px;">' + esc(p.error) + '</span>' : ' <span style="color:#a0907a;font-size:10px;">未加载</span>');
+      return '<div class="plugin-card">' +
+        '<div class="plugin-name">' + esc(p.name) + statusBadge + '</div>' +
+        '<div class="plugin-meta">' + tags + ' <span>' + meta + '</span></div>' +
+        '<div class="plugin-desc">' + esc(p.description || '无描述') + '</div>' +
+        '</div>';
+    }).join('');
+  }
+
+  function renderConfigPanel() {
+    var form = document.getElementById('config-form');
+    if (!configData || Object.keys(configData).length === 0) {
+      form.innerHTML = '<p style="color:#a0907a;text-align:center;padding:40px;">无法加载配置</p>';
+      return;
+    }
+    var fields = [
+      { key: 'provider', label: 'Provider', placeholder: 'openai / anthropic' },
+      { key: 'model', label: 'Model', placeholder: 'gpt-4o / claude-sonnet-4-20250514' },
+      { key: 'base_url', label: 'Base URL', placeholder: 'https://api.openai.com/v1' },
+      { key: 'api_key', label: 'API Key', placeholder: 'sk-...', masked: configData.api_key_masked },
+      { key: 'max_iterations', label: '最大迭代次数', placeholder: '100' },
+      { key: 'tool_timeout', label: '工具超时 (秒)', placeholder: '120' },
+      { key: 'max_workers', label: '最大并行数', placeholder: '8' },
+      { key: 'tool_delay', label: '工具延迟 (秒)', placeholder: '0.0' },
+      { key: 'SelfEvolutionModel', label: 'Self-Evolution 模型', placeholder: '留空则禁用' },
+      { key: 'SelfEvolutionTurn', label: 'Self-Evolution 轮次', placeholder: '8' },
+      { key: 'context_compress_threshold', label: '上下文压缩阈值 (字符)', placeholder: '900000' },
+      { key: 'admin_token', label: '管理员 Token', placeholder: 'jify-admin-2024' },
+    ];
+    form.innerHTML = fields.map(function(f) {
+      var value = configData[f.key];
+      if (value === null || value === undefined) value = '';
+      if (f.key === 'api_key') value = ''; // 不回填，用户编辑时才输入新值
+      var hint = '';
+      if (f.masked) hint = '<div class="hint">当前: ' + esc(f.masked) + '</div>';
+      return '<div class="config-group">' +
+        '<label>' + esc(f.label) + '</label>' +
+        '<input type="' + (f.key === 'api_key' ? 'password' : 'text') + '" id="cfg-' + f.key + '" value="' + esc(String(value)) + '" placeholder="' + esc(f.placeholder) + '">' +
+        hint +
+        '</div>';
+    }).join('');
+  }
+
+  window.saveConfig = function() {
+    var btn = document.getElementById('config-save-btn');
+    var msg = document.getElementById('config-save-msg');
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+    msg.textContent = '';
+    msg.style.color = '#8b7355';
+
+    var payload = {};
+    var fieldKeys = ['provider','model','base_url','api_key','max_iterations','tool_timeout','max_workers','tool_delay','SelfEvolutionModel','SelfEvolutionTurn','context_compress_threshold','admin_token'];
+    fieldKeys.forEach(function(k) {
+      var el = document.getElementById('cfg-' + k);
+      if (!el) return;
+      var v = el.value.trim();
+      if (v === '') return; // 空值不传，保留现有值
+      // 数字类型转换
+      if (['max_iterations','tool_timeout','max_workers','SelfEvolutionTurn','context_compress_threshold'].indexOf(k) >= 0) {
+        var num = Number(v);
+        if (!isNaN(num)) payload[k] = num;
+      } else if (k === 'tool_delay') {
+        var num = parseFloat(v);
+        if (!isNaN(num)) payload[k] = num;
+      } else {
+        payload[k] = v;
+      }
+    });
+
+    fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.ok) {
+        msg.textContent = '已保存，重启 Gateway 生效';
+        msg.style.color = '#16a34a';
+        // 刷新本地缓存
+        Object.keys(payload).forEach(function(k) { configData[k] = payload[k]; });
+      } else {
+        msg.textContent = data.message || '保存失败';
+        msg.style.color = '#dc2626';
+      }
+    })
+    .catch(function(e) {
+      msg.textContent = '网络错误';
+      msg.style.color = '#dc2626';
+    })
+    .finally(function() {
+      btn.disabled = false;
+      btn.textContent = '保存配置';
+    });
+  };
+
+  var ws = null;
+  var connected = false;
+  var currentMsgEl = null;
+  var thinkingEl = null;
+  var rawMarkdown = '';
+  var chatEl = document.getElementById('chat');
+  var emptyState = chatEl.querySelector('.empty-state');
+  var hasMessages = false;
+
+  function $(id) { return document.getElementById(id); }
+
+  function hideEmpty() {
+    if (emptyState && !hasMessages) { emptyState.style.display = 'none'; hasMessages = true; }
+  }
+
+  function scrollDown() {
+    requestAnimationFrame(function() {
+      chatEl.scrollTop = chatEl.scrollHeight;
+    });
+  }
+
+  function addMsg(html, cls) {
+    hideEmpty();
+    var div = document.createElement('div');
+    div.className = 'msg ' + (cls || '');
+    div.innerHTML = html;
+    chatEl.appendChild(div);
+    scrollDown();
+    return div;
+  }
+
+  var jifyAvatarSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><rect x="2" y="2" width="20" height="16" rx="4"/><circle cx="8" cy="10" r="1.5" fill="#fff" stroke="none"/><circle cx="16" cy="10" r="1.5" fill="#fff" stroke="none"/><line x1="9" y1="14" x2="15" y2="14"/><line x1="7" y1="20" x2="9" y2="18"/><line x1="17" y1="20" x2="15" y2="18"/><rect x="5" y1="19" width="14" height="3" rx="1"/></svg>';
+
+  function addUser(text) {
+    addMsg(
+      '<div class="msg-avatar">&#128100;</div>' +
+      '<div class="bubble">' + esc(text) + '</div>',
+      'msg-user'
+    );
+  }
+
+  function addAssistant() {
+    var el = addMsg(
+      '<div class="msg-avatar">' + jifyAvatarSvg + '</div>' +
+      '<div class="bubble"><div class="think-text"></div><div class="content"></div></div>',
+      'msg-assistant'
+    );
+    el.classList.add('streaming');
+    return el;
+  }
+
+  function addSystem(text) {
+    addMsg(
+      '<div class="bubble">' + esc(text) + '</div>',
+      'msg-system'
+    );
+  }
+
+  function addTool(name) {
+    return addMsg(
+      '&#128296; <span class="tool-name">' + esc(name) + '</span><span class="result"></span>',
+      'tool-msg'
+    );
+  }
+
+  function setStatus(phase, text) {
+    var bar = $('status-bar');
+    bar.className = phase;
+    $('status-text').textContent = text;
+    var stop = $('stop-btn');
+    stop.style.display = (phase === 'idle') ? 'none' : 'inline-flex';
+  }
+
+  function addThinking() {
+    hideEmpty();
+    var div = document.createElement('div');
+    div.className = 'think-indicator';
+    div.innerHTML = '&#128173; thinking <span class="dots"><span></span><span></span><span></span></span>';
+    chatEl.appendChild(div);
+    scrollDown();
+    return div;
+  }
+
+  function esc(text) {
+    var d = document.createElement('div');
+    d.textContent = text;
+    return d.innerHTML;
+  }
+
+  function connect() {
+    if (ws) { try { ws.close(); } catch(e) {} }
+
+    var url = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws?token=' + encodeURIComponent(token);
+    ws = new WebSocket(url);
+
+    ws.onopen = function() {
+      connected = true;
+      $('msg-input').focus();
+    };
+
+    ws.onmessage = function(e) {
+      try { handle(JSON.parse(e.data)); } catch(ex) {}
+    };
+
+    ws.onclose = function(e) {
+      connected = false;
+      if (e.code === 4001) {
+        sessionStorage.clear();
+        window.location.href = '/';
+        return;
+      }
+      addSystem('✗ 连接已断开');
+      setStatus('idle', '已断开');
+    };
+
+    ws.onerror = function() {
+      addSystem('✗ 连接失败，请确认网关已启动');
+    };
+  }
+
+  function handle(data) {
+    switch (data.type) {
+      case 'thinking_start':
+        setStatus('thinking', '思考中...');
+        if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+        if (!currentMsgEl) currentMsgEl = addAssistant();
+        rawMarkdown = '';
+        break;
+      case 'thinking':
+        if (currentMsgEl) {
+          var think = currentMsgEl.querySelector('.think-text');
+          if (!think) {
+            think = document.createElement('div');
+            think.className = 'think-text';
+            currentMsgEl.querySelector('.bubble').prepend(think);
+          }
+          think.textContent += data.content;
+        }
+        scrollDown();
+        break;
+      case 'text_chunk':
+        if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+        if (!currentMsgEl) currentMsgEl = addAssistant();
+        var contentEl = currentMsgEl.querySelector('.content');
+        rawMarkdown += data.content;
+        contentEl.innerHTML = marked.parse(rawMarkdown.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n'));
+        scrollDown();
+        break;
+      case 'tool_start':
+        setStatus('thinking', '执行工具: ' + data.tool_name);
+        if (currentMsgEl) { currentMsgEl.classList.remove('streaming'); currentMsgEl = null; }
+        thinkingEl = null;
+        addTool(data.tool_name);
+        break;
+      case 'tool_result':
+        var tools = document.querySelectorAll('.tool-msg .result');
+        if (tools.length) {
+          tools[tools.length-1].textContent = truncate(prettyJSON(data.result || ''), 300);
+        }
+        break;
+      case 'tool_error':
+        var tools2 = document.querySelectorAll('.tool-msg .result');
+        if (tools2.length) {
+          tools2[tools2.length-1].textContent = '错误: ' + prettyJSON(data.error || '');
+          tools2[tools2.length-1].style.color = '#dc2626';
+        }
+        break;
+      case 'done':
+        setStatus('compressing', '整理记忆...');
+        if (currentMsgEl) {
+          currentMsgEl.classList.remove('streaming');
+          var c = currentMsgEl.querySelector('.content');
+          if (c) c.innerHTML = marked.parse(rawMarkdown.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n'));
+        }
+        currentMsgEl = null;
+        thinkingEl = null;
+        rawMarkdown = '';
+        setTimeout(function() { setStatus('idle', '就绪'); }, 800);
+        break;
+      case 'status':
+        if (data.phase && data.text) setStatus(data.phase, data.text);
+        break;
+      case 'error':
+        addSystem('&#9888; ' + (data.content || 'Unknown error'));
+        break;
+      case 'interrupted':
+        addSystem('&#9208; 已中断');
+        if (currentMsgEl) { currentMsgEl.classList.remove('streaming'); currentMsgEl = null; }
+        setStatus('idle', '就绪');
+        break;
+      case 'cleared':
+        chatEl.innerHTML = '';
+        emptyState = document.createElement('div');
+        emptyState.className = 'empty-state';
+        emptyState.innerHTML = '<div class="big-icon">&#9889;</div><h3>Jify 已就绪</h3><p>我能帮你做什么?</p>';
+        chatEl.appendChild(emptyState);
+        hasMessages = false;
+        break;
+    }
+  }
+
+  function prettyJSON(s) {
+    if (typeof s !== 'string') {
+      if (s !== null && typeof s === 'object') return JSON.stringify(s, null, 2);
+      return String(s);
+    }
+    try {
+      var p = JSON.parse(s);
+      while (typeof p === 'string') {
+        try { p = JSON.parse(p); } catch(e2) { break; }
+      }
+      return JSON.stringify(p, null, 2);
+    } catch(e) { return s; }
+  }
+
+  function truncate(s, n) { return s && s.length > n ? s.slice(0, n) + '...' : s; }
+
+  function send() {
+    var input = $('msg-input');
+    var text = input.value.trim();
+    if (!text) return;
+
+    if (!connected || !ws || ws.readyState !== WebSocket.OPEN) {
+      addSystem('&#9888; 未连接，请退出登录后重新登录');
+      return;
+    }
+
+    if (text === '/new') {
+      ws.send(JSON.stringify({ type: 'clear' }));
+      input.value = '';
+      input.style.height = 'auto';
+      return;
+    }
+
+    addUser(text);
+    ws.send(JSON.stringify({ type: 'chat', content: text }));
+    input.value = '';
+    input.style.height = 'auto';
+  }
+
+  $('send-btn').onclick = send;
+  $('stop-btn').onclick = function() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    this.disabled = true;
+    ws.send(JSON.stringify({ type: 'interrupt' }));
+    setTimeout(function() { $('stop-btn').disabled = false; }, 2000);
+  };
+  $('msg-input').onkeydown = function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  };
+
+  /* auto-resize textarea */
+  $('msg-input').oninput = function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 140) + 'px';
+  };
+
+  connect();
+})();
+</script>
+</body>
+</html>

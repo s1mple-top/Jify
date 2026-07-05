@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jify · 登录</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+  background: #faf7f2;
+  color: #3d3929;
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+}
+.container { width: 400px; max-width: 92vw; }
+.header { text-align: center; margin-bottom: 28px; }
+.header h1 { color: #92400e; font-size: 28px; font-weight: 700; letter-spacing: -0.3px; margin-bottom: 4px; }
+.header p { color: #a0907a; font-size: 13px; }
+
+/* Card */
+.card {
+  background: #fff;
+  border: 1px solid #e8ddcc;
+  border-radius: 16px;
+  padding: 28px 24px;
+  box-shadow: 0 2px 16px rgba(0,0,0,.03), 0 4px 32px rgba(0,0,0,.02);
+}
+.form-group { margin-bottom: 16px; }
+.form-group label {
+  display: block;
+  font-size: 12px; color: #8b7355;
+  margin-bottom: 6px; font-weight: 600;
+}
+.form-group input {
+  width: 100%;
+  background: #faf5ed; border: 1px solid #d4c5a9;
+  color: #3d3929;
+  padding: 10px 14px; border-radius: 10px;
+  font-size: 14px; outline: none;
+  font-family: inherit;
+  transition: border-color .15s, box-shadow .15s;
+}
+.form-group input:focus {
+  border-color: #b45309;
+  background: #fff;
+  box-shadow: 0 0 0 4px rgba(180,83,9,.06);
+}
+
+.submit-btn {
+  width: 100%;
+  background: linear-gradient(135deg, #b45309, #c45d1d);
+  color: #fff; border: none;
+  padding: 12px; border-radius: 10px;
+  cursor: pointer; font-size: 15px; font-weight: 600;
+  transition: all .15s;
+  margin-top: 4px;
+  box-shadow: 0 2px 8px rgba(180,83,9,.2);
+}
+.submit-btn:hover {
+  background: linear-gradient(135deg, #a0470a, #b45309);
+  box-shadow: 0 4px 14px rgba(180,83,9,.3);
+  transform: translateY(-1px);
+}
+.submit-btn:disabled {
+  background: #e8ddcc; color: #a0907a;
+  cursor: not-allowed; box-shadow: none; transform: none;
+}
+
+.error {
+  color: #dc2626; font-size: 13px;
+  text-align: center; margin-top: 12px;
+  min-height: 20px;
+}
+.hint {
+  font-size: 11px; color: #a0907a;
+  margin-top: 6px; line-height: 1.5;
+}
+
+/* Footer */
+.footer {
+  text-align: center; margin-top: 20px;
+  font-size: 11px; color: #a0907a;
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>&#9889; Jify </h1>
+    <p>交互式编程助手</p>
+  </div>
+  <div class="card">
+    <div class="form-group">
+      <label>管理员 Token</label>
+      <input type="password" id="admin-token" placeholder="请输入管理员 token">
+    </div>
+    <div class="hint">无需用户名和密码，输入在 config.yaml 中配置的 admin_token 即可登录</div>
+    <button class="submit-btn" id="admin-submit" style="margin-top:14px;" onclick="adminLogin()">管理员登录</button>
+    <div class="error" id="admin-error"></div>
+  </div>
+  <div class="footer">Jify v1.0</div>
+</div>
+<script>
+(function(){
+  window.adminLogin = async function() {
+    var token = document.getElementById('admin-token').value.trim();
+    var btn = document.getElementById('admin-submit');
+    var err = document.getElementById('admin-error');
+    err.textContent = '';
+    if (!token) { err.textContent = '请输入管理员 token'; return; }
+    btn.disabled = true;
+    btn.textContent = '登录中...';
+    try {
+      var resp = await fetch('/api/admin_login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: token })
+      });
+      var data = await resp.json();
+      if (resp.ok) {
+        sessionStorage.setItem('jify_token', data.token);
+        sessionStorage.setItem('jify_user_id', data.user_id);
+        sessionStorage.setItem('jify_username', data.username);
+        window.location.href = '/chat';
+      } else {
+        err.textContent = data.detail || '登录失败';
+      }
+    } catch(e) {
+      err.textContent = '网络错误，请确认网关已启动';
+    }
+    btn.disabled = false;
+    btn.textContent = '管理员登录';
+  };
+
+  document.getElementById('admin-token').onkeydown = function(e) { if (e.key==='Enter') adminLogin(); };
+})();
+</script>
+</body>
+</html>

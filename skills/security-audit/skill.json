@@ -1,0 +1,4 @@
+{
+  "name": "security-audit",
+  "description": "对 Python Web/Agent 项目进行系统化安全审计。覆盖架构理解、多维漏洞扫描、PoC 编写、依赖链追踪的全流程方法论。适用于 AI Agent 框架、FastAPI/Django 应用、多组件架构项目。"
+}
