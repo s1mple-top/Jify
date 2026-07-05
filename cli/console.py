@@ -443,6 +443,7 @@ class CLIConsole:
                 "team_delegate_parallel": "并行委派",
                 "team_broadcast": "广播",
                 "team_add_worker": "添加 Worker",
+                "team_remove_worker": "移除 Worker",
                 "team_status": "查询",
             }.get(name, "Team")
             self._output.queue_output(Text(""))
