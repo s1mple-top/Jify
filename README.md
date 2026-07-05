@@ -8,7 +8,7 @@ Jify（Self-evolving harness）是一款运行在您自己的设备上的个人 
 
 ```bash
 # 从源码安装
-git clone https://github.com/<your-username>/jify.git
+git clone https://github.com/s1mple-top/Jify.git
 cd jify
 pip install -e .
 jify
