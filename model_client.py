@@ -286,11 +286,6 @@ class OpenAIClient:
     所有参数均可通过环境变量覆盖：
         OPENAI_API_KEY
         OPENAI_BASE_URL
-
-    使用方式（推荐）：
-        from model_client import get_openai_client
-        client = get_openai_client()           # 自动缓存
-        client = get_openai_client(base_url="http://localhost:8000/v1")  # 本地模型
     """
 
     def __init__(self, api_key: Optional[str] = None,
@@ -383,10 +378,6 @@ class AnthropicClient:
 
     所有参数均可通过环境变量覆盖，优先从配置拿：
         ANTHROPIC_API_KEY
-
-    使用方式（推荐）：
-        from model_client import get_anthropic_client
-        client = get_anthropic_client()  # 自动缓存
     """
 
     def __init__(self, api_key: Optional[str] = None,
@@ -601,11 +592,6 @@ def get_model_client(provider: str,
 
     Returns:
         客户端实例，支持 .chat() 方法
-
-    示例：
-        client = get_model_client("openai")
-        client = get_model_client("openai", base_url="http://localhost:8000/v1")
-        client = get_model_client("anthropic")
     """
     provider = provider.lower().strip()
 
