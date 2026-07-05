@@ -30,7 +30,7 @@ jify
 jify
 
 # 单次提问（非交互模式）
-jify -q "帮我分析当前目录的项目结构"
+jify -q "介绍下你自己"
 
 # 启动 Web UI 
 jify gateway --port 9090
