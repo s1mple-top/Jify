@@ -38,6 +38,11 @@ DEFAULT_CONFIG_YAML = """\
 # base_url: https://api.openai.com/v1
 # api_key: "sk-xxx"
 
+# 自进化引擎模型选择，需要配置
+#SelfEvolutionModel: gpt-4o
+# 用户画像提取间隔轮数
+#SelfEvolutionTurn: 8
+
 # 运行时参数
 # 最大Loop轮数
 max_iterations: 100
