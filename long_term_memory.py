@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 """
+
+一期暂时不启用
+
 长期记忆模块 — 基于 Markdown 文件，按 user_id 分片。 提供gateway使用
 
 CLI 模式不挂载。网关模式下，由 gateway.py 按需使用，
