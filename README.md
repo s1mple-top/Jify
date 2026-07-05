@@ -70,10 +70,7 @@ jify --think-stream
 
 ```bash
 # 启动网关
-python gateway.py --port 9090
-
-# 添加用户
-python gateway.py --add-user admin password123
+jify gateway --port 9090
 ```
 
 ### 插件系统
