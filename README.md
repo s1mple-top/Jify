@@ -9,11 +9,13 @@ Jify（Self-evolving harness）是一款运行在您自己的设备上的个人 
 ```bash
 # 从源码安装
 git clone https://github.com/s1mple-top/Jify.git
-cd jify
+cd Jify
 pip install -e .
 jify
 
 # 或使用 uv（推荐）
+git clone https://github.com/s1mple-top/Jify.git
+cd Jify
 uv sync
 source .venv/bin/activate
 jify
