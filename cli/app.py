@@ -374,18 +374,48 @@ class JifyCLI:
                 self._p2p_consumer_busy.clear()
 
     def _create_summarizer(self):
-        """为自进化引擎创建一个独立的 model client（线程安全），返回 (prompt) -> str 的 callable"""
+        """为自进化引擎创建一个独立的 model client
+
+        优先级：
+          1. SelfEvolutionModel 非空且命中 models 列表 → 用该条目建独立 client
+          2. 未命中或为空 → 回退到当前激活模型
+        """
+        se_model_name = self.config.SelfEvolutionModel
+        if se_model_name:
+            mc = self.config.get_model_config(se_model_name)
+            if mc is not None:
+                client = get_model_client(
+                    provider=mc.provider or self.config.provider,
+                    api_key=mc.api_key or self.config.api_key,
+                    base_url=mc.base_url or self.config.base_url,
+                )
+                model = mc.model
+
+                def summarize(prompt: str) -> str:
+                    response = client.chat(
+                        messages=[{"role": "user", "content": prompt}],
+                        tool_schemas=[],
+                        model=model,
+                        temperature=0.3,
+                        max_tokens=1024,
+                    )
+                    return response.content
+
+                return summarize
+
+        # 回退到当前激活模型
         client = get_model_client(
             provider=self.config.provider,
             api_key=self.config.api_key,
             base_url=self.config.base_url,
         )
+        model = self.config.model
 
         def summarize(prompt: str) -> str:
             response = client.chat(
                 messages=[{"role": "user", "content": prompt}],
                 tool_schemas=[],
-                model=self.config.SelfEvolutionModel,
+                model=model,
                 temperature=0.3,
                 max_tokens=1024,
             )
