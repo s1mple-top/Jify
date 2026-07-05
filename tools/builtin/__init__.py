@@ -12,6 +12,6 @@ from tools.builtin.mcp_tools import mcp_reload, mcp_list
 from tools.builtin.skill_create import skill_create
 # from tools.builtin.workflow_tool import run_workflow # workflow 暂时摒弃
 from tools.builtin.subagent import subagent_run
-from tools.builtin.team_tools import team_delegate, team_broadcast, team_delegate_parallel, team_status, team_add_worker
+from tools.builtin.team_tools import team_delegate, team_broadcast, team_delegate_parallel, team_status, team_add_worker, team_remove_worker
 from tools.builtin.todo_tool import update_todos
 # from tools.builtin.memory_tool import memory_search    # 长期记忆暂不启用
