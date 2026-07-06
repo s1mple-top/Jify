@@ -467,11 +467,11 @@ class AutoAgent:
                         else:
                             conn.close()   # 已有连接，关闭多余连接
                             continue
-                    # 把 accept 阶段读取到的剩余帧（如紧跟在 welcome 后面的 task）重新打包
+                    # 把 accept 阶段读取到的所有帧（含用于注册的第一帧）重新打包
                     # 注入 recv_buffers，由 handle_receive 统一处理。
-                    if len(frames) > 1:
+                    if len(frames) > 0:
                         import struct as _struct
-                        for f in frames[1:]:
+                        for f in frames:
                             prefix = _struct.pack('>I', len(f))
                             buffer = bytearray(prefix) + bytearray(f) + buffer
                     if buffer:
@@ -641,7 +641,6 @@ class AutoAgent:
     def _handle_request(self, p2p_msg):
         """在线程池中执行智能体核心处理逻辑，处理完后发送回复"""
         # 忙碌检查：若当前正忙且是 task/chat 请求，直接回复忙，不放入处理队列
-        # 这里会有一个极小的bug，因为is_p2p_busy是在从队列拿消息之后set，如果极端情况下有多个p2p请求过来，依然会全部塞入队列里
         if is_p2p_busy() and p2p_msg.type in ("task", "chat"):
             if p2p_msg.sender and p2p_msg.conversation_id:
                 busy_reply = P2PMessage(
