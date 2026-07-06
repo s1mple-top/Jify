@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
+import time
 import json
 import os
 import queue
 import random
 import re
 import select
-import signal
 import textwrap
 import threading
 import sys
 import uuid
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -36,7 +34,7 @@ from self_evolution import SelfEvolutionEngine, EvolutionTask, TaskPhase
 from model_client import get_model_client
 from agent_p2p import (
     init_p2p, stop_p2p, set_request_handler,
-    build_prompt_from_message, set_post_handler_callback,
+    build_prompt_from_message,
 )
 from output_engine import JifyTheme
 from tools.approval import termios_lock
@@ -44,18 +42,6 @@ from cli.console import CLIConsole
 from .bootstrap import ensure_jify_home
 
 console = JifyTheme.create_console()
-
-
-# 任务检查点：保存被中断任务的状态，用于后续恢复
-
-@dataclass
-class TaskCheckpoint:
-    """保存被中断任务的状态，用于后续恢复。主 chat 和 p2p 冲突下的快照"""
-    messages: list  # AgentLoop 的完整消息列表
-    user_msg: str  # 原始用户输入
-    system_prompt: str  # 系统提示词
-    tool_schemas: list  # 工具 schemas
-
 
 
 # Slash 命令系统 — 输入 "/" 自动补全
@@ -249,16 +235,6 @@ class JifyCLI:
         )
         self._p2p_consumer_thread.start()
 
-        # P2P 消费者忙碌标记：_p2p_handler 据此决定是否打断当前任务
-        self._p2p_consumer_busy = threading.Event()
-
-        # 任务检查点：P2P 请求打断用户任务后，保存状态以便恢复用户的主chat
-        self._task_checkpoint: Optional[TaskCheckpoint] = None
-
-        # 任务续接：P2P 请求打断用户任务后自动恢复
-        self._last_user_input: Optional[str] = None
-        self._loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
-
         # P2P 初始化：随机选取一个可用名称，socket 冲突时自动尝试下一个
         try:
             available = list(P2P_AGENT_NAMES)
@@ -282,14 +258,10 @@ class JifyCLI:
             def _p2p_handler(p2p_msg):
                 """P2P 请求处理器：入队 + 阻塞等待结果（FIFO 公平调度）。
 
-                多个智能体同时请求时，按到达顺序排队处理，避免竞态导致的任务丢失。
+                多个智能体同时请求时，按到达顺序排队处理，等待当前用户 chat 结束后再执行。
+                不打断用户正在进行的对话。
                 运行在 AutoAgent 的线程池中。
                 """
-                # 仅打断用户 chat，不打断其他 P2P 任务
-                # P2P consumer 正忙时新请求直接入队，consumer 完成后自然取下一个
-                if not _cli_ref._p2p_consumer_busy.is_set():
-                    _cli_ref.interrupt()
-
                 reply_event = threading.Event()
                 reply_container: Dict[str, str] = {}
 
@@ -311,8 +283,8 @@ class JifyCLI:
     def _p2p_consumer(self) -> None:
         """FIFO 消费者线程：从队列依次取出 P2P 请求并处理。
 
-        保证多个智能体同时请求时的公平调度（先到先处理），
-        全部处理完成后仅触发一次 _schedule_resume()。
+        不打断用户 chat，等待当前对话结束后再获取锁执行。
+        保证多个智能体同时请求时的公平调度（先到先处理）。
         """
         while True:
             try:
@@ -320,15 +292,10 @@ class JifyCLI:
             except queue.Empty:
                 continue
 
-            self._p2p_consumer_busy.set()
+            # 阻塞等待当前用户 chat 结束释放锁，不打断当前的chat，因为用户同时使用p2p和chat的概率极低
+            self._agent_lock.acquire()
 
-            acquired = self._agent_lock.acquire(timeout=30)
-            if not acquired:
-                reply_container['response'] = '[错误] 智能体正忙于处理其他任务，请稍后重试' # 锁
-                reply_event.set()
-                self._p2p_consumer_busy.clear()
-                continue
-
+            # 停止终端打印，并不停止接收
             self.cli_console.stop_p2p_listener()
             try:
                 prompt = build_prompt_from_message(p2p_msg)
@@ -360,10 +327,6 @@ class JifyCLI:
 
                 reply_container['response'] = result.get('final_response', '') if result else ''
 
-                # 队列已空：最后一条请求处理完毕，仅安排一次续接恢复原本的用户主对话
-                if self._p2p_queue.empty():
-                    self._schedule_resume()
-
             except Exception as e:
                 reply_container['response'] = f'[处理异常] {e}'
             finally:
@@ -371,7 +334,6 @@ class JifyCLI:
                 self.cli_console.start_p2p_listener()
                 self._agent_lock.release()
                 reply_event.set() # 执行完毕set信号
-                self._p2p_consumer_busy.clear()
 
     def _create_summarizer(self):
         """为自进化引擎创建一个独立的 model client
@@ -423,25 +385,13 @@ class JifyCLI:
 
         return summarize
 
-    async def chat(self, user_input: str, initial_messages=None) -> None:
-        """处理一轮对话（think 状态栏由 CLIConsole.consume_stream 内部渲染）
-
-        Args:
-            user_input: 用户输入
-            initial_messages: 可选，恢复任务时传入的历史消息列表
-        """
-        # 尝试获取锁，对话任务完成之后释放掉
+    def chat(self, user_input: str) -> None:
+        """处理一轮对话（think 状态栏由 CLIConsole.consume_stream 内部渲染）"""
+        # 尝试获取锁，对话任务完成之后释放掉，主chat和p2p
         acquired = self._agent_lock.acquire(timeout=30)
         if not acquired:
             meta("  [智能体正忙，请稍候]")
             return
-
-        # 全新任务开始时清除旧检查点，Jifyp通信打断后恢复原始用户对话
-        if initial_messages is None:
-            self._task_checkpoint = None
-
-        # 记录用户任务，供 P2P 请求打断后自动续接
-        self._last_user_input = user_input
 
         try:
             self._interrupt.clear()
@@ -458,24 +408,13 @@ class JifyCLI:
             try:
                 if not input_is_active:
                     self._start_esc_listener() # 开启 esc 监听，打断机制
-                result = await asyncio.to_thread(
-                    self.agent.run,
+                result = self.agent.run(
                     message_id="cli",
                     user_message=user_input,
                     system_prompt=self.system_prompt,
                     console=self.cli_console,
                     tool_schemas=self.tools,
-                    initial_messages=initial_messages,
                 )
-
-                # 保存被中断的任务状态（P2P 打断时），供后续恢复
-                if result and result.get('interrupted'):
-                    self._task_checkpoint = TaskCheckpoint(
-                        messages=result.get('messages', []),
-                        user_msg=user_input,
-                        system_prompt=self.system_prompt,
-                        tool_schemas=self.tools,
-                    )
 
                 # 过滤基础架构工具，避免自进化误将"团队模式"等视为用户偏好
                 tools_used = []
@@ -516,53 +455,6 @@ class JifyCLI:
                     f"✓ 完成 — {result.get('iterations', 0)} 轮迭代, 总耗时 {result.get('elapsed', 0):.1f}s, 总消耗 token {result.get('total_tokens', 0) // 2}")
         finally:
             self._agent_lock.release()
-
-    async def _resume_chat(self) -> None:
-        """自动续接被 P2P 请求中断的用户任务。
-
-        优先从 TaskCheckpoint 恢复完整上下文（消息历史 + 系统提示词 + 工具），
-        回退到 _last_user_input 简单重放。
-
-        由 post-handler callback 通过 run_coroutine_threadsafe 调度到事件循环中执行。
-        """
-        # 二次校验：_schedule_resume 与 _resume_chat 之间存在时间窗口，
-        # 用户可能已开始新一轮输入，此时不应启动后台 chat 干扰终端状态
-        if self.cli_console._output._input_active.is_set():
-            self._task_checkpoint = None
-            return
-
-        checkpoint = self._task_checkpoint
-        self._task_checkpoint = None
-
-        if checkpoint and checkpoint.messages:
-            meta("  [从检查点恢复被中断的任务]")
-            await self.chat(
-                "请继续执行你之前被中断的任务。",
-                initial_messages=checkpoint.messages,
-            )
-        elif self._last_user_input:
-            meta("  [重启自己原始任务]")
-            resume_msg = "请继续你自己的原始的任务，同时把这几条来自其他智能体和你的回复作为你可参考的经验，如果你自己本来就没有做什么任务，那不必做任何事"
-            await self.chat(resume_msg)
-
-    def _schedule_resume(self) -> None:
-        """安排任务续接：设置 P2P 后处理回调，在回复发送后自动续接任务。
-
-        如果当前输入框处于活跃状态（用户正在 prompt_toolkit 中输入），
-        则不立即调度续接，避免 ESC 监听器的终端模式切换与 prompt_toolkit 冲突。
-        """
-        if not self._last_user_input:
-            return
-        if self.cli_console._output._input_active.is_set():
-            self._task_checkpoint = None
-            return
-        _cli_ref = self
-
-        def _resume_callback():
-            """P2P 后处理回调：在 AutoAgent 线程池中执行，调度续接任务到事件循环"""
-            asyncio.run_coroutine_threadsafe(_cli_ref._resume_chat(), _cli_ref._loop)
-
-        set_post_handler_callback(_resume_callback)
 
     def interrupt(self) -> None:
         self._interrupt.set()
@@ -699,17 +591,16 @@ def meta(text: str) -> None:
 
 
 # 主 REPL
-# 避免 loop 被 prompt_toolkit 阻塞，致使 p2p 阻塞
-async def read_input(prompt: str = "> ") -> str:
+def read_input(prompt: str = "> ") -> str:
     global _paste_buffers
     try:
-        return await asyncio.to_thread(_cli_session.prompt, prompt, wrap_lines=True)
+        return _cli_session.prompt(prompt, wrap_lines=True)
     except (EOFError, KeyboardInterrupt):
         _paste_buffers = []  # 非正常退出时清理粘贴占位符，防止污染下次输入
         return ""
 
 
-async def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
+def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
     console.clear()
 
     # 初始化 Agent
@@ -759,7 +650,7 @@ async def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None
         while True:
             # console.print()
             sys.stdout.flush()
-            await asyncio.sleep(0.1)
+            time.sleep(0.1)
 
             # 自进化 Skill 审批弹窗
             pending = agent_cli.evolution.get_pending_skills()
@@ -779,7 +670,7 @@ async def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None
                 console.print()
                 console.print(Text("  [A]ccept  [R]eject  [D]efer (跳过)", style=JifyTheme.SUBTLE))
                 agent_cli.cli_console.set_input_active(True)
-                choice = await read_input("  skill >     ")
+                choice = read_input("  skill >     ")
                 agent_cli.cli_console.set_input_active(False)
 
                 choice = choice.strip().lower()
@@ -796,7 +687,7 @@ async def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None
                 divider()
 
             agent_cli.cli_console.set_input_active(True)
-            user_input = await read_input("> ")
+            user_input = read_input("> ")
             agent_cli.cli_console.set_input_active(False)
 
             if not user_input.strip():
@@ -980,7 +871,7 @@ async def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None
                     continue
                 elif cmd == "jify":
                     try:
-                        await agent_cli.chat(
+                        agent_cli.chat(
                             "浏览当前目录下的项目，了解下整体的架构，把最终的理解生成Jify.md写在当前目录下")
                     except Exception as e:
                         meta(f"  ⚠ 了解项目失败: {e}")
@@ -1001,8 +892,8 @@ async def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None
             # AI 回复
             meta(f"Jify · {datetime.now().strftime('%H:%M')}")
             try:
-                await agent_cli.chat(user_input)
-            except asyncio.CancelledError:
+                agent_cli.chat(user_input)
+            except KeyboardInterrupt:
                 agent_cli.interrupt()
                 console.print()
                 meta("  [已中断]")
@@ -1033,15 +924,15 @@ async def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None
         JifyCLI.cleanup_p2p()
 
 
-async def single_turn(user_input: str, think_stream: bool = False, safe_exec: bool = False) -> None:
+def single_turn(user_input: str, think_stream: bool = False, safe_exec: bool = False) -> None:
     """单轮快速提问模式（python cli.py -q "你好"）"""
     agent_cli = JifyCLI(think_stream, safe_exec)
 
     console.print()
     meta(f"Jify · {datetime.now().strftime('%H:%M')}")
     try:
-        await agent_cli.chat(user_input)
-    except asyncio.CancelledError:
+        agent_cli.chat(user_input)
+    except KeyboardInterrupt:
         agent_cli.interrupt()
         console.print()
         meta("  [已中断]")
@@ -1079,29 +970,10 @@ def main() -> None:
         return
 
     # 默认 CLI 模式
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
     if args.quick:
-        main_task = loop.create_task(single_turn(args.quick, args.think_stream, args.safe_exec))
+        single_turn(args.quick, args.think_stream, args.safe_exec)
     else:
-        main_task = loop.create_task(main_loop(args.think_stream, args.safe_exec))
-
-    def handle_sigint():
-        main_task.cancel()
-
-    # 干净的 kill 收尾
-    try:
-        signal.signal(signal.SIGINT, lambda s, f: handle_sigint())
-    except ValueError:
-        pass
-
-    try:
-        loop.run_until_complete(main_task)
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        pass
-    finally:
-        loop.close()
+        main_loop(args.think_stream, args.safe_exec)
 
 
 def _run_gateway(args: argparse.Namespace) -> None:
