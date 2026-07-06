@@ -2,7 +2,6 @@
 from .console import CLIConsole
 from .app import (
     JifyCLI,
-    TaskCheckpoint,
     SlashCompleter,
     SLASH_COMMANDS,
     divider,
@@ -16,7 +15,6 @@ from .app import (
 __all__ = [
     "CLIConsole",
     "JifyCLI",
-    "TaskCheckpoint",
     "SlashCompleter",
     "SLASH_COMMANDS",
     "divider",
