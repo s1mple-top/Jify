@@ -12,6 +12,7 @@ from typing import Dict, Optional
 
 from rich.text import Text
 
+from agent_p2p import set_p2p_busy
 from event_bus import event_bus
 from output_engine import OutputEngine, JifyTheme
 
@@ -485,11 +486,13 @@ class CLIConsole:
     def start_p2p_listener(self) -> None:
         if self._listener_thread and self._listener_thread.is_alive():
             return
+        set_p2p_busy(False)
         self._stop_listener.clear()
         self._listener_thread = threading.Thread(target=self._p2p_listen, daemon=True)
         self._listener_thread.start()
 
     def stop_p2p_listener(self) -> None:
+        set_p2p_busy(True)
         self._stop_listener.set()
         if self._listener_thread and self._listener_thread.is_alive():
             self._listener_thread.join(timeout=1)
