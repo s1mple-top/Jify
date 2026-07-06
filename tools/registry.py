@@ -10,7 +10,6 @@ from event_bus import event_bus, UIEvent
 from tools.models import ToolDef
 
 
-
 # Subagent 白名单 (contextvars，协程级隔离)
 _subagent_whitelist: 'contextvars.ContextVar[Optional[set]]' = \
     contextvars.ContextVar('subagent_whitelist', default=None)
@@ -32,7 +31,6 @@ class ToolRegistry:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
                     cls._instance._tools: Dict[str, ToolDef] = {}
-                    cls._instance._tools_lock = threading.RLock()
         return cls._instance
 
     def register(
@@ -46,30 +44,26 @@ class ToolRegistry:
             requires_approval: bool = False,
             preview_handler: Optional[Callable] = None,
     ) -> None:
-        with self._tools_lock:
-            self._tools[name] = ToolDef(
-                name=name,
-                description=description,
-                parameters=parameters,
-                handler=handler,
-                parallel_safe=parallel_safe,
-                timeout=timeout,
-                requires_approval=requires_approval,
-                preview_handler=preview_handler,
-            )
+        self._tools[name] = ToolDef(
+            name=name,
+            description=description,
+            parameters=parameters,
+            handler=handler,
+            parallel_safe=parallel_safe,
+            timeout=timeout,
+            requires_approval=requires_approval,
+            preview_handler=preview_handler,
+        )
 
     def get(self, name: str) -> Optional[ToolDef]:
-        with self._tools_lock:
-            return self._tools.get(name)
+        return self._tools.get(name)
 
     def get_all_names(self) -> List[str]:
-        with self._tools_lock:
-            return list(self._tools.keys())
+        return list(self._tools.keys())
 
     def unregister(self, name: str) -> bool:
         """移除已注册的工具，返回是否成功"""
-        with self._tools_lock:
-            return self._tools.pop(name, None) is not None
+        return self._tools.pop(name, None) is not None
 
     def dispatch(self, name: str, args: Dict[str, Any]) -> str:
         """分派工具调用，返回 JSON 字符串
