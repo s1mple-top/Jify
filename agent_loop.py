@@ -469,7 +469,7 @@ class AgentLoop:
             if break_requested.is_set():
                 break_requested.clear()
                 event_bus.put(UIEvent("MESSAGE", "[审批] 用户终止当前任务。"))
-                is_interrupted = True
+                # 审批打断不设 is_interrupted，避免产生 TaskCheckpoint 快照
                 final_msg = "任务已被用户中断 (break)。"
                 break
 
@@ -532,8 +532,8 @@ class AgentLoop:
             final_msg = text_content if text_content else f"[API 调用失败] {self._last_api_error}"
         elif is_interrupted:
             final_msg = final_msg or "任务被中断"
-        else:
-            final_msg = "任务被中断" if is_interrupted else "达到最大迭代次数"
+        elif not final_msg:
+            final_msg = "达到最大迭代次数"
         event_bus.put(UIEvent("MESSAGE", final_msg))
         # 持久化前保存本轮完整消息
         with self._session_messages_lock:
