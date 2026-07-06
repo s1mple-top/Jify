@@ -641,6 +641,7 @@ class AutoAgent:
     def _handle_request(self, p2p_msg):
         """在线程池中执行智能体核心处理逻辑，处理完后发送回复"""
         # 忙碌检查：若当前正忙且是 task/chat 请求，直接回复忙，不放入处理队列
+        # 这里会有一个极小的bug，因为is_p2p_busy是在从队列拿消息之后set，如果极端情况下有多个p2p请求过来，依然会全部塞入队列里
         if is_p2p_busy() and p2p_msg.type in ("task", "chat"):
             if p2p_msg.sender and p2p_msg.conversation_id:
                 busy_reply = P2PMessage(
