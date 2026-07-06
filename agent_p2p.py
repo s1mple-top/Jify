@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Intelligent agent communication base with async processing and reply queue
-
-Test: python agent_auto.py --name <your_agent_name>
+agent_p2p JifyP能力
 """
 
 import socket
@@ -642,6 +640,21 @@ class AutoAgent:
 
     def _handle_request(self, p2p_msg):
         """在线程池中执行智能体核心处理逻辑，处理完后发送回复"""
+        # 忙碌检查：若当前正忙且是 task/chat 请求，直接回复忙，不放入处理队列
+        if is_p2p_busy() and p2p_msg.type in ("task", "chat"):
+            if p2p_msg.sender and p2p_msg.conversation_id:
+                busy_reply = P2PMessage(
+                    id=str(uuid_module.uuid4()),
+                    sender=self.my_name,
+                    target=p2p_msg.sender,
+                    type="error",
+                    content="当前智能体正忙，请稍后再试",
+                    conversation_id=p2p_msg.conversation_id,
+                    reply_to=p2p_msg.id,
+                )
+                self._enqueue_send(p2p_msg.sender, busy_reply.to_json())
+            return
+
         # 优先走外部注入的处理器（CLI 注册的 handler）
         handler = get_request_handler()
         if handler is not None:
@@ -1054,6 +1067,22 @@ def is_processing_p2p_request() -> bool:
     """当前线程是否正在处理 P2P 请求（_handle_request 上下文中）"""
     return getattr(_p2p_tls, 'is_processing', False)
 
+
+# 全局忙碌标志 — 设置后 P2P 收到 task/chat 请求会直接返回“正忙”，不放入处理队列
+_p2p_busy = False
+_p2p_busy_lock = threading.Lock()
+
+
+def set_p2p_busy(busy: bool) -> None:
+    """设置 P2P 忙碌标志。busy=True 时，收到的 task/chat 请求会被直接拒绝。"""
+    global _p2p_busy
+    with _p2p_busy_lock:
+        _p2p_busy = busy
+
+
+def is_p2p_busy() -> bool:
+    with _p2p_busy_lock:
+        return _p2p_busy
 
 
 # 全局请求处理器 — 允许 CLI 注入自己的 AgentLoop
