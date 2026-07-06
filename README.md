@@ -3,8 +3,6 @@
 
 Jify（Self-evolving harness）是一款运行在您自己的设备上的个人 AI 助手。它可以帮你完成您需要的编程任务、安全排查
 
-暂不支持windows
-
 ## 安装
 
 ```bash
