@@ -1070,24 +1070,20 @@ def is_processing_p2p_request() -> bool:
 
 # 全局忙碌标志 — 设置后 P2P 收到 task/chat 请求会直接返回“正忙”，不放入处理队列
 _p2p_busy = False
-_p2p_busy_lock = threading.Lock()
 
 
 def set_p2p_busy(busy: bool) -> None:
     """设置 P2P 忙碌标志。busy=True 时，收到的 task/chat 请求会被直接拒绝。"""
     global _p2p_busy
-    with _p2p_busy_lock:
-        _p2p_busy = busy
+    _p2p_busy = busy
 
 
 def is_p2p_busy() -> bool:
-    with _p2p_busy_lock:
-        return _p2p_busy
+    return _p2p_busy
 
 
 # 全局请求处理器 — 允许 CLI 注入自己的 AgentLoop
 _request_handler: Optional[Callable] = None
-_handler_lock = threading.Lock()
 
 
 def set_request_handler(handler: Callable) -> None:
@@ -1101,13 +1097,11 @@ def set_request_handler(handler: Callable) -> None:
     实现与用户直接交互一致的流式渲染效果。
     """
     global _request_handler
-    with _handler_lock:
-        _request_handler = handler
+    _request_handler = handler
 
 
 def get_request_handler() -> Optional[Callable]:
-    with _handler_lock:
-        return _request_handler
+    return _request_handler
 
 
 def set_agent_loop(agent_loop) -> None:
