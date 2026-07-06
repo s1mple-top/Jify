@@ -11,7 +11,7 @@ import json
 import random
 import time
 import logging
-import threading
+
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Iterator
@@ -171,12 +171,6 @@ class AnthropicStreamAdapter:
 
             yield sc
 
-
-
-# 客户端缓存（线程安全单例）
-# 全局缓存：key -> client 实例
-_client_cache: Dict[str, Any] = {}
-_cache_lock = threading.Lock()
 
 
 def _make_cache_key(provider: str, api_key: str, base_url: str) -> str:
