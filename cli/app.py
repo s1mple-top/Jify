@@ -186,7 +186,6 @@ class JifyCLI:
 
         # 加载MCP 配置（快捷路径，仅加载配置不建连）
         self._mcp_loaded = False
-        self._tools_lock = threading.RLock()
         try:
             from tools.mcp.manager import mcp_manager
             n = mcp_manager.load_servers()
@@ -256,8 +255,9 @@ class JifyCLI:
             _cli_ref = self  # 闭包捕获
 
             def _p2p_handler(p2p_msg):
-                """P2P 请求处理器。
-                极端情况下，多个智能体同时请求时会都入队，按到达顺序排队处理，等待当前用户 chat 结束后再执行。
+                """P2P 请求处理器：入队 + 阻塞等待结果（FIFO 公平调度）。
+
+                多个智能体同时请求时，按到达顺序排队处理，等待当前用户 chat 结束后再执行。
                 不打断用户正在进行的对话。
                 运行在 AutoAgent 的线程池中。
                 """
@@ -280,8 +280,10 @@ class JifyCLI:
 
 
     def _p2p_consumer(self) -> None:
-        """
+        """FIFO 消费者线程：从队列依次取出 P2P 请求并处理。
+
         不打断用户 chat，等待当前对话结束后再获取锁执行。
+        保证多个智能体同时请求时的公平调度（先到先处理）。
         """
         while True:
             try:
@@ -292,7 +294,6 @@ class JifyCLI:
             # 阻塞等待当前用户 chat 结束释放锁，不打断当前的chat，因为用户同时使用p2p和chat的概率极低
             self._agent_lock.acquire()
 
-            # 停止入处理队列，并不停止接收,存在极小的bug，如果同时有多个p2p请求，会赶在stop之前全部入队
             self.cli_console.stop_p2p_listener()
             try:
                 prompt = build_prompt_from_message(p2p_msg)
@@ -397,7 +398,7 @@ class JifyCLI:
             self.cli_console._stream_count = 0
             self.cli_console._pending_sent_tokens = 0
 
-            # 开始执行的时候暂停监听，只暂停 p2p 入队处理
+            # 开始执行的时候暂停监听
             self.cli_console.stop_p2p_listener()
 
             input_is_active = self.cli_console._output._input_active.is_set()
@@ -530,9 +531,7 @@ class JifyCLI:
                     },
                 })
 
-        # mcp p2p/chat 并发写 加锁
-        with self._tools_lock:
-            self.tools = tools
+        self.tools = tools
 
     def start_mcp_async(self) -> None:
         """后台线程连接 MCP server，不阻塞主线程。
