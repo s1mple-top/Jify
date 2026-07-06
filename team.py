@@ -7,15 +7,6 @@
 - Worker: 轻量级 Agent, 专注执行, 有独立的 system_prompt 和工具白名单
 - 所有 Worker 复用 Leader 的 model_client, 在同一进程内线程执行
 
-使用方式:
-    orchestrator = TeamOrchestrator(model_client, config)
-    orchestrator.add_worker("code-reviewer", system_prompt="你是代码审查专家...", 
-                             whitelist={"read_file", "static_analysis", "exec"})
-    orchestrator.add_worker("bug-fixer", system_prompt="你是 bug 修复专家...",
-                             whitelist={"read_file", "patch_file", "exec"})
-    orchestrator.start()
-    # Leader 调用 team_delegate / team_broadcast 工具
-    orchestrator.shutdown()
 """
 
 import json
@@ -33,13 +24,11 @@ from subagent import SubagentRunner
 from tools.registry import registry, _subagent_whitelist
 
 _output_engine: Any = None
-_output_engine_lock = threading.Lock()
 
 
 def set_output_engine(engine: Any) -> None:
     global _output_engine
-    with _output_engine_lock:
-        _output_engine = engine
+    _output_engine = engine
 
 
 def get_output_engine() -> Any:
