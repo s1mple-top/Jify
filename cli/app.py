@@ -295,7 +295,7 @@ class JifyCLI:
             # 阻塞等待当前用户 chat 结束释放锁，不打断当前的chat，因为用户同时使用p2p和chat的概率极低
             self._agent_lock.acquire()
 
-            # 停止终端打印，并不停止接收
+            # 停止入处理队列，并不停止接收
             self.cli_console.stop_p2p_listener()
             try:
                 prompt = build_prompt_from_message(p2p_msg)
