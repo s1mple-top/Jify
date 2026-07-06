@@ -400,7 +400,7 @@ class JifyCLI:
             self.cli_console._stream_count = 0
             self.cli_console._pending_sent_tokens = 0
 
-            # 开始执行的时候暂停监听，只暂停 p2p 的 event bus 接受展示，避免输出打印紊乱
+            # 开始执行的时候暂停监听，只暂停 p2p 入队处理
             self.cli_console.stop_p2p_listener()
 
             input_is_active = self.cli_console._output._input_active.is_set()
