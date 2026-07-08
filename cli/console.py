@@ -454,8 +454,28 @@ class CLIConsole:
             # self._output._tool_running = True
             return
 
+        # if name == "read_file":
+        #     pass
+
         if name == "read_file":
-            pass
+            # pass
+            try:
+                tool_args = json.loads(args_str) if args_str else {}
+            except Exception:
+                tool_args = {}
+            path = tool_args.get("path", "")
+            if isinstance(path, str):
+                display_path = path.rsplit("/", 1)[-1] if path else "…"
+            else:
+                display_path = str(path) if path else "…"
+            limit = tool_args.get("limit", "All")
+            self._output.queue_output(Text(""))
+            self._output.queue_output(Text(f"• Read({display_path})", style="bold white"))
+            self._output.queue_output(Text(
+                f"  ⎿  Read {limit} lines", style=JifyTheme.SUBTLE
+            ))
+
+
         elif args_str:
             name_line, detail_line = OutputEngine.format_tool_call(name, args_str)
             self._output.queue_output(Text(""))
