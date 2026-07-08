@@ -472,7 +472,10 @@ class CLIConsole:
             except Exception as e:
                 return json.dumps({"error": str(e)}, ensure_ascii=False)
 
-        pending[tc_id] = executor.submit(_exec, tc_id, name, args)
+        # 交给后续的_execute_tools执行 同步执行策略
+        if name != "patch_file" and name != "write_file":
+            pending[tc_id] = executor.submit(_exec, tc_id, name, args)
+        # pending[tc_id] = executor.submit(_exec, tc_id, name, args)
         # self._output._tool_running = True 不显示toolcall，因为毫秒级
 
     def flush_stream(self, is_final: bool = False) -> None:
