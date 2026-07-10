@@ -275,8 +275,6 @@ class JifyCLI:
         except Exception as e:
             meta(f"  P2P: init failed — {e}")
         self._interrupt = threading.Event()
-        self._esc_stop = threading.Event()
-        self._esc_thread: Optional[threading.Thread] = None
 
 
     def _p2p_consumer(self) -> None:
@@ -401,11 +399,8 @@ class JifyCLI:
             # 开始执行的时候暂停监听
             self.cli_console.stop_p2p_listener()
 
-            input_is_active = self.cli_console._output._input_active.is_set()
             result = None
             try:
-                if not input_is_active:
-                    self._start_esc_listener() # 开启 esc 监听，打断机制
                 result = self.agent.run(
                     message_id="cli",
                     user_message=user_input,
@@ -440,8 +435,6 @@ class JifyCLI:
 
                 self.cli_console.drain_events()
             finally:
-                if not input_is_active:
-                    self._stop_esc_listener()
                 self.cli_console.finalize()
 
             self.cli_console.start_p2p_listener()
@@ -465,56 +458,6 @@ class JifyCLI:
         except Exception:
             pass
 
-    def _start_esc_listener(self) -> None:
-
-        if self._esc_thread and self._esc_thread.is_alive():
-            return
-
-        self._esc_stop.clear()
-        cli = self
-
-        def _listen() -> None:
-            import termios
-            import tty
-            fd = sys.stdin.fileno()
-            with termios_lock:
-                old_attrs = termios.tcgetattr(fd)
-            try:
-                with termios_lock:
-                    tty.setcbreak(fd) # 修改为cbreak，cooked会缓冲
-                while not cli._esc_stop.is_set():
-                    from tools.approval import is_approval_active
-                    # 暂停监听 0.15 秒，避免审批期间按 ESC 误触发中断
-                    if is_approval_active():
-                        cli._esc_stop.wait(0.15)
-                        continue
-                    r, _, _ = select.select([sys.stdin], [], [], 0.15)
-                    if r:
-                        try:
-                            ch = sys.stdin.read(1)
-                        except Exception:
-                            break
-                        if ch == '\x1b':
-                            cli.interrupt()
-                            console.print(Text("  [ESC 中断]", style=JifyTheme.RED))
-            except Exception:
-                pass
-            finally:
-                with termios_lock:
-                    termios.tcsetattr(fd, termios.TCSAFLUSH, old_attrs)
-
-        self._esc_thread = threading.Thread(target=_listen, daemon=True)
-        self._esc_thread.start()
-
-    def _stop_esc_listener(self) -> None:
-        """终止 ESC 监听线程。
-
-        _esc_stop 事件通知线程退出循环，线程在 finally 块中恢复终端属性。
-        """
-        self._esc_stop.set()
-        if self._esc_thread and self._esc_thread.is_alive():
-            self._esc_thread.join(timeout=2.0)
-        self._esc_thread = None
 
     def _build_tools(self, reg) -> None:
         """从 registry 重建工具 schema 列表，线程安全。"""
