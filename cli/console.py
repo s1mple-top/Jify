@@ -164,6 +164,7 @@ class CLIConsole:
         finish_reason = ""
         pre_results: Dict[str, str] = {}
         pending_futures: Dict[str, concurrent.futures.Future] = {}
+        _fired_indices: set = set()
         tc_names: Dict[str, str] = {}
         tc_args: Dict[str, dict] = {}
         tc_id_to_idx: Dict[str, int] = {}
@@ -247,17 +248,19 @@ class CLIConsole:
 
                     current_indices = {tc.index for tc in chunk.tool_call_deltas}
                     for cidx in list(tool_call_chunks.keys()):
-                        if cidx not in current_indices and cidx not in pending_futures:
+                        if cidx not in current_indices and cidx not in _fired_indices:
                             self._fire_tool(cidx, tool_call_chunks, pending_futures,
                                             pre_results, tool_executor, jf_registry,
                                             tc_names, tc_args, tc_id_to_idx)
+                            _fired_indices.add(cidx)
 
                 elif last_seen_idx >= 0 and pending_futures:
                     for cidx in list(tool_call_chunks.keys()):
-                        if cidx not in pending_futures:
+                        if cidx not in _fired_indices:
                             self._fire_tool(cidx, tool_call_chunks, pending_futures,
                                             pre_results, tool_executor, jf_registry,
                                             tc_names, tc_args, tc_id_to_idx)
+                            _fired_indices.add(cidx)
 
                 last_seen_idx = _tool_current_index()
 
@@ -300,10 +303,11 @@ class CLIConsole:
         from tools.approval import break_requested
         if not break_requested.is_set():
             for cidx in list(tool_call_chunks.keys()):
-                if cidx not in pending_futures:
+                if cidx not in _fired_indices:
                     self._fire_tool(cidx, tool_call_chunks, pending_futures,
                                     pre_results, tool_executor, jf_registry,
                                     tc_names, tc_args, tc_id_to_idx)
+                    _fired_indices.add(cidx)
 
         for tc_id, future in pending_futures.items():
             if tc_id in pre_results:
@@ -328,36 +332,20 @@ class CLIConsole:
                             style=JifyTheme.SUBTLE
                         ))
                         self._output.clear_subagent()
-                        pre_results[tc_id] = data["result"]
+                        _sa_name = tc_names.get(tc_id, "subagent_run")
+                        _sa_args = tc_args.get(tc_id, {})
+                        pre_results[f"{_sa_name}:{json.dumps(_sa_args, sort_keys=True)}"] = data["result"]
                         continue
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-                tool_name = tc_names.get(tc_id, "")
-                if tool_name == "read_file":
-                    idx = tc_id_to_idx.get(tc_id)
-                    if idx is not None and idx in tool_call_chunks:
-                        args_str = tool_call_chunks[idx].get("function", {}).get("arguments", "{}")
-                        try:
-                            tool_args = json.loads(args_str) if args_str else {}
-                        except Exception:
-                            tool_args = {}
-                    else:
-                        tool_args = tc_args.get(tc_id, {})
-                    path = tool_args.get("path", "")
-                    if isinstance(path, str):
-                        display_path = path.rsplit("/", 1)[-1] if path else "…"
-                    else:
-                        display_path = str(path) if path else "…"
-                    limit = tool_args.get("limit", "All")
-                    self._output.queue_output(Text(f"• Read({display_path})", style="bold white"))
-                    self._output.queue_output(Text(
-                        f"  ⎿  Read {limit} lines", style=JifyTheme.SUBTLE
-                    ))
-
-                pre_results[tc_id] = raw
+                _tool_name = tc_names.get(tc_id, "")
+                _tool_args = tc_args.get(tc_id, {})
+                pre_results[f"{_tool_name}:{json.dumps(_tool_args, sort_keys=True)}"] = raw
             except Exception as e:
-                pre_results[tc_id] = json.dumps({"error": str(e)}, ensure_ascii=False)
+                _err_name = tc_names.get(tc_id, "")
+                _err_args = tc_args.get(tc_id, {})
+                pre_results[f"{_err_name}:{json.dumps(_err_args, sort_keys=True)}"] = json.dumps({"error": str(e)}, ensure_ascii=False)
 
         # self._output._tool_running = False
         # self._output._tool_done = True
