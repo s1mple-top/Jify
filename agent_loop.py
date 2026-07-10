@@ -569,9 +569,10 @@ class AgentLoop:
                 name=tc["function"]["name"],
                 args=json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"] else {},
             )
-            # 流式预执行命中
-            if tc["id"] in pre_results:
-                tcall.result = pre_results[tc["id"]]
+            # 流式预执行命中（按 name:json(args) 匹配）
+            _sig = f"{tcall.name}:{json.dumps(tcall.args, sort_keys=True)}"
+            if _sig in pre_results:
+                tcall.result = pre_results[_sig]
                 tcall.duration = 0
                 tcall.error = False
                 try:
