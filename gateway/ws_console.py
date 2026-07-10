@@ -65,6 +65,8 @@ class WebSocketConsole:
         finish_reason = ""
         pre_results: Dict[str, Any] = {}
         pending_futures: Dict[str, concurrent.futures.Future] = {}
+        _fired_indices: set = set()
+        fired_signatures: set = set()
         tc_names: Dict[str, str] = {}
         tc_args: Dict[str, dict] = {}
         tc_id_to_idx: Dict[str, int] = {}
@@ -120,17 +122,21 @@ class WebSocketConsole:
 
                     current_indices = {tc.index for tc in chunk.tool_call_deltas}
                     for cidx in list(tool_call_chunks.keys()):
-                        if cidx not in current_indices and cidx not in pending_futures:
+                        if cidx not in current_indices and cidx not in _fired_indices:
                             self._fire_tool(cidx, tool_call_chunks, pending_futures,
                                             pre_results, tool_executor,
-                                            tc_names, tc_args, tc_id_to_idx)
+                                            tc_names, tc_args, tc_id_to_idx,
+                                            fired_signatures)
+                            _fired_indices.add(cidx)
 
                 elif last_seen_idx >= 0 and pending_futures:
                     for cidx in list(tool_call_chunks.keys()):
-                        if cidx not in pending_futures:
+                        if cidx not in _fired_indices:
                             self._fire_tool(cidx, tool_call_chunks, pending_futures,
                                             pre_results, tool_executor,
-                                            tc_names, tc_args, tc_id_to_idx)
+                                            tc_names, tc_args, tc_id_to_idx,
+                                            fired_signatures)
+                            _fired_indices.add(cidx)
 
                 last_seen_idx = max(tool_call_chunks.keys()) if tool_call_chunks else -1
 
@@ -144,10 +150,12 @@ class WebSocketConsole:
         from tools.approval import break_requested
         if not break_requested.is_set():
             for cidx in list(tool_call_chunks.keys()):
-                if cidx not in pending_futures:
+                if cidx not in _fired_indices:
                     self._fire_tool(cidx, tool_call_chunks, pending_futures,
                                     pre_results, tool_executor,
-                                    tc_names, tc_args, tc_id_to_idx)
+                                    tc_names, tc_args, tc_id_to_idx,
+                                    fired_signatures)
+                    _fired_indices.add(cidx)
 
         # 等待所有预执行完成
         for tc_id, future in pending_futures.items():
@@ -165,12 +173,13 @@ class WebSocketConsole:
 
         tool_executor.shutdown(wait=False)
 
-        return complete_text, tool_call_chunks, finish_reason, pre_results
+        return complete_text, tool_call_chunks, finish_reason, pre_results, fired_signatures
 
     # 流式预执行 _fire_tool（对齐 CLIConsole）
 
     def _fire_tool(self, idx, chunks, pending, pre, executor,
-                   tc_names=None, tc_args=None, tc_id_to_idx=None):
+                   tc_names=None, tc_args=None, tc_id_to_idx=None,
+                   fired_signatures=None):
         from tools.approval import break_requested
         if break_requested.is_set():
             return
@@ -206,3 +215,5 @@ class WebSocketConsole:
                 return tid, {"error": str(e)}, str(e)
 
         pending[tc_id] = executor.submit(_exec_tool, tc_id, name, args)
+        if fired_signatures is not None:
+            fired_signatures.add(f"{name}:{_json.dumps(args, sort_keys=True)}")
