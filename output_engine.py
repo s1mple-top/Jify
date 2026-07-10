@@ -296,7 +296,7 @@ class OutputEngine:
             t.append(f" · ↑ {self.fmt_tokens(sent // 2)} tokens", style=JifyTheme.YELLOW)
         if recv > 0:
             t.append(f" · ↓ {self.fmt_tokens(recv // 2)} tokens", style=JifyTheme.GREEN)
-        t.append(" · esc to interrupt", style=JifyTheme.SUBTLE)
+        t.append(" · ctrl+c to interrupt", style=JifyTheme.SUBTLE)
 
         phase_text = {
             "thinking": "think...",
