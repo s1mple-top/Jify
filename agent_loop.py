@@ -322,6 +322,8 @@ class AgentLoop:
         self._last_api_error = None
         self._interrupt_requested = False
         self._interrupt_event.clear()
+        from tools.approval import clear_break
+        clear_break()
 
         run_start = time.time()
 
