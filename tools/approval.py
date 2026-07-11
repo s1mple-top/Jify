@@ -262,7 +262,9 @@ def _approval_consumer() -> None:
             f.set_exception(e)
         finally:
             # restart live AFTER terminal is fully restored (by _read_approval_choice's finally)
-            if _engine is not None:
+            # 跳过 break 场景：agent loop 即将退出，会通过 finalize() → stop_live() 清理，
+            # 避免 restart_live() 与 stop_live() 在不同线程中并发导致 Live 泄露
+            if _engine is not None and not break_requested.is_set():
                 _engine.restart_live()
 
 
