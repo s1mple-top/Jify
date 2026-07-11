@@ -82,6 +82,10 @@ jify gateway --port 9090
 
 内置 MCP (Model Context Protocol) 客户端，通过 `mcp_servers.json` 配置文件集成外部工具服务。
 
+### 模型配置
+
+初次启动会自动构建 ~/.jify 目录，请在其下的 config.yaml 里配置需要的模型
+
 ## License
 
 MIT
