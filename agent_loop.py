@@ -221,6 +221,7 @@ class AgentLoop:
     # 对话接口
     def clear_history(self) -> None:
         """清除所有累积的消息历史，重置上下文。"""
+        self.ctx.shutdown()
         self.messages.clear()
         self.iteration_count = 0
         self._interrupt_requested = False
@@ -817,74 +818,6 @@ class AgentLoop:
         except Exception:
             return ""
 
-    # 已废弃：_format_turn_text（轮次格式化已由 ContextManager._format_turn 替代）
-    # def _format_turn_text(self, turn_messages: List[Message]) -> str:
-    #     """将一轮消息格式化为结构化文本。
-    #
-    #     [结果] 保留规则：
-    #       - patch_file 的结果始终保留
-    #       - read_file 的结果仅当该文件本轮被 patch_file 修改时保留（提供修改前上下文）
-    #       - 其余工具结果不保留
-    #     """
-    #     tool_call_map = {}       # tool_call_id -> {"name": ..., "args": ...}
-    #     tool_result_map = {}     # tool_call_id -> result text
-    #     patched_files = set()    # 本轮被 patch_file 修改的文件路径
-    #     keep_result_ids = set()  # 需要保留结果的 tool_call_id
-    #
-    #     # 第一遍：收集 tool_call 信息
-    #     for msg in turn_messages:
-    #         if msg.role == "assistant" and msg.tool_calls:
-    #             for tc in msg.tool_calls:
-    #                 tc_id = tc.get("id", "")
-    #                 name = tc.get("function", {}).get("name", "") if isinstance(tc.get("function"), dict) else tc.get("name", "")
-    #                 args_str = tc.get("function", {}).get("arguments", "{}") if isinstance(tc.get("function"), dict) else tc.get("args", "{}")
-    #                 tool_call_map[tc_id] = {"name": name, "args": args_str}
-    #                 if name == "patch_file":
-    #                     keep_result_ids.add(tc_id)
-    #                     fp = self._extract_file_path(args_str)
-    #                     if fp:
-    #                         patched_files.add(fp)
-    #         elif msg.role == "tool" and msg.tool_call_id:
-    #             tool_result_map[msg.tool_call_id] = msg.content or ""
-    #
-    #     # read_file 读取的文件被 patch 过 → 保留结果
-    #     for tc_id, info in tool_call_map.items():
-    #         if info["name"] == "read_file":
-    #             fp = self._extract_file_path(info["args"])
-    #             if fp and fp in patched_files:
-    #                 keep_result_ids.add(tc_id)
-    #
-    #     lines = []
-    #     for msg in turn_messages:
-    #         if msg.role == "user":
-    #             lines.append(f"历史用户输入: {msg.content}")
-    #         elif msg.role == "assistant":
-    #             if msg.tool_calls:
-    #                 for tc in msg.tool_calls:
-    #                     tc_id = tc.get("id", "")
-    #                     info = tool_call_map.get(tc_id, {})
-    #                     name = info.get("name", "unknown")
-    #                     args = info.get("args", "{}")
-    #                     lines.append(f"[工具] {name}({args})")
-    #                     if tc_id in keep_result_ids:
-    #                         result = tool_result_map.get(tc_id, "(空)")
-    #                         lines.append(f"[结果] {result}")
-    #             if msg.content:
-    #                 lines.append(f"模型输出: {msg.content}")
-    #     return "\n".join(lines)
-
-    # @staticmethod
-    # def _extract_file_path(args_str: str) -> str:
-    #     """从工具 JSON 参数中提取文件路径。"""
-    #     try:
-    #         args = json.loads(args_str)
-    #     except Exception:
-    #         return ""
-    #     for key in ("file_path", "path", "target_file"):
-    #         if args.get(key):
-    #             return args[key]
-    #     return ""
-
     @staticmethod
     def _format_tool_calls_text(tool_calls: List[Dict]) -> str:
         """将 tool_calls 列表转为可读文本描述，用于保存对话时替代原始 tool_calls 字段。
@@ -909,27 +842,25 @@ class AgentLoop:
         """用 session_summary 替换 messages 中的早期轮次，保留最近几轮完整 tool call 链。
 
         触发条件：单轮内 messages 总字符数超 context_compress_threshold。
-        策略：system + 摘要版 user + 最近 5 条消息（含当前轮 assistant/tool）。
+        策略：system + 摘要 + tail（最近 assistant/tool）+ 当前 user 消息。
+        当前 user 消息放在最底部，确保 LLM 最后看到待回答的问题。
         """
         summary = self.ctx.session_summary
-        keep_tail = 5  # 保留最近 N 条消息（约 2-3 轮 tool call 链）
-
-        # 构造摘要版 user 消息
-        new_user_content = (
-            "=== 压缩历史摘要 ===\n"
-            f"{summary}\n\n"
-            "=== 当前消息 ===\n"
-            f"{user_message}"
-        )
+        keep_tail = 5  # 保留最近 N 条消息（保留当前轮 tool-call 链上下文）
 
         # 保留 system + 最近 keep_tail 条非 system 消息
         head = [m for m in self.messages if m.role == "system"]
         tail = self.messages[-keep_tail:] if len(self.messages) > keep_tail else []
         tail = [m for m in tail if m.role != "system"]
 
-        self.messages = head + [Message(role="user", content=new_user_content)] + tail
+        # 摘要作为单独的 user 消息，当前消息放最后
+        self.messages = head + [
+            Message(role="user", content=f"=== 压缩历史摘要 ===\n{summary}"),
+        ] + tail + [
+            Message(role="user", content=user_message),
+        ]
         # 不更新 turn_start_idx，因为替换后 user 消息位置可能变化，但后续只需
-        # session_summary 已参与交互，本轮后续检测不会再重复触发（摘要版消息更短）
+        # session_summary 已参与交互，本轮后续检测不会再重复触发
 
     def interrupt(self) -> None:
         """请求中断当前循环，优雅的打断"""
