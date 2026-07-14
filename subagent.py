@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""协程级 Subagent 执行器 — 复用 model_client，同步执行，contextvars 工具隔离"""
+"""Subagent 执行器 — 复用 model_client，同步执行，contextvars 工具隔离，暂时不考虑异步执行"""
 
 import json
 import threading
