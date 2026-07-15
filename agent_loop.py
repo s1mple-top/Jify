@@ -164,18 +164,6 @@ def _get_provider_extra_body(config: "AgentConfig") -> dict:
 class AgentLoop:
     """
     Agent 循环核心类
-
-    使用方式：
-
-    1. 直接指定 provider（推荐）：
-        agent = AgentLoop(config=AgentConfig(provider="openai", model="gpt-4o"))
-        agent.run("帮我查一下天气")
-
-    2. 外部注入 client：
-        from model_client import get_model_client
-        client = get_model_client("openai")
-        agent = AgentLoop(model_client=client)
-        agent.run("帮我查一下天气")
     """
 
     def __init__(self, model_client: Optional[Any] = None,
@@ -282,7 +270,12 @@ class AgentLoop:
         return self._session_id
 
     def load_conversation(self, session_id: str) -> List[Message]:
-        """从 SQLite 加载会话消息，返回 Message 列表并存入 _resume_messages"""
+        """从 SQLite 加载会话消息，返回 Message 列表并存入 _resume_messages。
+
+        同时将恢复的消息写入 ctx.session_summary，确保跨轮持久：
+        - 首轮 has_history=True → _resume 不重复注入
+        - build_user_context 始终包含恢复的会话历史
+        """
         from storage.db import get_db
 
         db = get_db()
@@ -299,6 +292,18 @@ class AgentLoop:
 
         self._resume_messages = messages
         self._session_id = session_id
+
+        # 将恢复的会话历史注入 session_summary，确保跨轮持久
+        if messages:
+            parts = ["=== 恢复的会话历史 ==="]
+            for m in messages:
+                role_label = "用户" if m.role == "user" else "Jify"
+                parts.append(f"{role_label}: {m.content or ''}")
+            if self.ctx.session_summary:
+                self.ctx.session_summary = "\n".join(parts) + "\n\n" + self.ctx.session_summary
+            else:
+                self.ctx.session_summary = "\n".join(parts)
+
         return messages
 
     def run(self, message_id: str, user_message: str, system_prompt: str, console, tool_schemas,

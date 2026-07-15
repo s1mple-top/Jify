@@ -41,7 +41,7 @@ class ContextManager:
     """
 
     # 常量
-    MAX_RECENT_TURNS = 8               # 保留最近 N 轮完整记录
+    # MAX_RECENT_TURNS = 8               # 保留最近 N 轮完整记录
     INCREMENTAL_COMPRESS_INTERVAL = 4  # 每 N 轮触发一次增量压缩
     MAX_SESSION_SUMMARY_CHARS = 60000   # session_summary 最大字符数，超限触发 LLM 二次压缩
 
@@ -58,7 +58,7 @@ class ContextManager:
 
 
     def shutdown(self) -> None:
-        """优雅关闭后台压缩线程，等待队列中的任务完成。"""
+        """优雅关闭后台压缩线程"""
         self._compress_queue.put(None)
         if self._worker.is_alive():
             self._worker.join(timeout=10)
@@ -102,48 +102,51 @@ class ContextManager:
                 and len(self.session_summary) > self.MAX_SESSION_SUMMARY_CHARS):
             self._compress_queue.put(("compact",))
 
-    # 系统上下文构建
-    def build_system_context(self, token_budget: int = 3000) -> str:
-        """构建注入 system prompt 的会话上下文。
-
-        截断到 token_budget * 4 字符（粗略估计），避免挤占 system prompt。
-
-        Args:
-            token_budget: 分配给该上下文的 token 上限
-
-        Returns:
-            截断后的会话摘要文本；无摘要则返回空字符串
-        """
-        summary = self.get_session_summary()
-        if not summary:
-            return ""
-        max_chars = token_budget * 4
-        if len(summary) <= max_chars:
-            return summary
-        return summary[:max_chars]
+    # # 系统上下文构建
+    # def build_system_context(self, token_budget: int = 3000) -> str:
+    #     """构建注入 system prompt 的会话上下文。
+    #
+    #     截断到 token_budget * 4 字符（粗略估计），避免挤占 system prompt。
+    #
+    #     Args:
+    #         token_budget: 分配给该上下文的 token 上限
+    #
+    #     Returns:
+    #         截断后的会话摘要文本；无摘要则返回空字符串
+    #     """
+    #     summary = self.get_session_summary()
+    #     if not summary:
+    #         return ""
+    #     max_chars = token_budget * 4
+    #     if len(summary) <= max_chars:
+    #         return summary
+    #     return summary[:max_chars]
 
     def build_user_context(self, user_message: str) -> str:
         """构建用户消息（拼接全部对话历史）。
-
-        摘要不注入日常交互，仅作为超长替换的后备资源。
-        若无历史轮次，直接返回原始消息。
-
+        若无历史轮次且无 session_summary，直接返回原始消息。
         Args:
             user_message: 用户当前输入
-
         Returns:
             包含全部历史轮次和当前输入的组合文本
         """
-        if not self.turn_history:
+        if not self.turn_history and not self.session_summary:
             return user_message
 
         parts = []
 
-        parts.append("=== 对话历史 ===")
-        for t in self.turn_history:
-            parts.append(self._format_turn(t))
-        parts.append("")
+        # 优先展示 session_summary（/resume 恢复的会话历史或压缩摘要）
+        if self.session_summary:
+            parts.append(self.session_summary.rstrip())
+            if self.turn_history:
+                parts.append("")
 
+        if self.turn_history:
+            parts.append("=== 对话历史 ===")
+            for t in self.turn_history:
+                parts.append(self._format_turn(t))
+
+        parts.append("")
         parts.append("=== 当前消息 ===")
         parts.append(user_message)
 
