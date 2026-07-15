@@ -216,6 +216,8 @@ class AgentLoop:
         self._interrupt_event.clear()
         self._last_api_error = None
         self.ctx = ContextManager(summarizer=self._summarize)
+        with self._session_messages_lock:
+            self._session_messages.clear()
 
     # 会话持久化
     def save_conversation(self) -> Optional[str]:
@@ -455,9 +457,11 @@ class AgentLoop:
                 #                               "----------\r\n" + "used ctx str length (Not token len): " + str(
                 #                                   len(self.ctx.get_session_summary())) + "\r\n"))
                 console.stream_end()
-                # 持久化前保存本轮完整消息
+                # 持久化前保存本轮完整消息（extend 而非赋值，避免覆盖历史轮次）
                 with self._session_messages_lock:
-                    self._session_messages = list(self.messages)
+                    self._session_messages.extend(
+                        [m for m in self.messages if m.role != "system"]
+                    )
                 # 格式化本轮 → 追加到历史 → 重建 messages 只留 system
                 self._append_turn_to_history(_turn_start_idx)
 
@@ -543,9 +547,11 @@ class AgentLoop:
         elif not final_msg:
             final_msg = "达到最大迭代次数"
         event_bus.put(UIEvent("MESSAGE", final_msg))
-        # 持久化前保存本轮完整消息
+        # 持久化前保存本轮完整消息（extend 而非赋值，避免覆盖历史轮次）
         with self._session_messages_lock:
-            self._session_messages = list(self.messages)
+            self._session_messages.extend(
+                [m for m in self.messages if m.role != "system"]
+            )
         self._append_turn_to_history(_turn_start_idx)
         elapsed = time.time() - run_start
         total_tokens = console.total_tokens_sent + console.total_tokens_recv
