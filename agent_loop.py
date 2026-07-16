@@ -66,7 +66,7 @@ class AgentConfig:
     SelfEvolutionModel: str= ""
     SelfEvolutionTurn: int = 8  # 每 N 轮做一次画像提取
     enabled_plugins: Optional[List[str]] = None  # None = 全部加载
-    context_compress_threshold: int = 900000  # 总字符数超过此阈值时触发上下文压缩
+    context_compress_threshold: int = 1000000  # 总字符数超过此阈值时触发上下文压缩
     models: List[ModelConfig] = field(default_factory=list)  # 多模型配置列表
 
     @classmethod
@@ -185,6 +185,7 @@ class AgentLoop:
         self._session_id: Optional[str] = None
         self._resume_messages: List[Message] = []  # /resume 加载的历史消息
         self._last_api_error: Optional[str] = None
+        self._context_emergency_compressed: bool = False  # 兜底压缩只做一次，防无限重试
 
         # 活跃流引用：ESC 中断时关闭底层 HTTP 连接
         self._active_stream: Any = None
@@ -370,7 +371,8 @@ class AgentLoop:
         self.messages.append(Message(role="user", content=context))
 
         # 记录本轮起始位置（history / resume 之后的第一条 user 即本轮起点）
-        _turn_start_idx = len(self.messages) - 1
+        self._turn_start_idx = len(self.messages) - 1
+        _turn_start_idx = self._turn_start_idx
 
         # Hook after_prompt_build
         hook_manager.trigger("after_prompt_build", {
@@ -411,6 +413,14 @@ class AgentLoop:
                 response = self._call_model(self.messages, tool_schemas, console.last_reasoning_content)
             except Exception as e:
                 logger.exception("API call failed at iteration %d", self.iteration_count)
+                # 紧急压缩：无旁路摘要 + 上下文溢出 + 未尝试过 → 压缩一次后重试
+                if (not self.ctx.session_summary
+                        and not self._context_emergency_compressed
+                        and self._looks_like_context_overflow(e)):
+                    self._context_emergency_compressed = True
+                    event_bus.put(UIEvent("MESSAGE", "[上下文溢出] 正在调用模型压缩上下文..."))
+                    self._emergency_compress(user_message)
+                    continue
                 self._last_api_error = str(e)
                 tool_calls = []
                 text_content = f"[API 调用失败] {e}\n请检查网络连接或 API 配置后重试。"
@@ -534,10 +544,14 @@ class AgentLoop:
             if self.config.tool_delay > 0:
                 time.sleep(self.config.tool_delay)
 
-            # 上下文超长检测：总字符数超阈值时用摘要替换早期轮次
+            # 上下文超长检测
             _total_chars = sum(len(str(m)) for m in self.messages)
-            if _total_chars > self.config.context_compress_threshold and self.ctx.session_summary:
-                self._compress_messages(user_message)
+            if _total_chars > self.config.context_compress_threshold:
+                if self.ctx.session_summary:
+                    # 旁路压缩已存在：截断 turn_history（仅保留未压缩轮次）+ 重建 messages
+                    if self.ctx.truncate_compressed_turns():
+                        self._rebuild_messages(user_message, _turn_start_idx)
+                # 无 session_summary（<4 轮）：不做处理，等模型抛上下文溢出后走紧急压缩
 
         is_interrupted = self._interrupt_requested or is_interrupted
         if self._last_api_error:
@@ -849,29 +863,67 @@ class AgentLoop:
         """重建 messages 只留 system（轮次记录已由 ctx.end_turn 处理）。"""
         self.messages = [m for m in self.messages if m.role == "system"]
 
-    def _compress_messages(self, user_message: str) -> None:
-        """用 session_summary 替换 messages 中的早期轮次，保留最近几轮完整 tool call 链。
 
-        触发条件：单轮内 messages 总字符数超 context_compress_threshold。
-        策略：system + 摘要 + tail（最近 assistant/tool）+ 当前 user 消息。
-        当前 user 消息放在最底部，确保 LLM 最后看到待回答的问题。
+    def _rebuild_messages(self, user_message: str, turn_start_idx: int) -> None:
+        """用截断后的 turn_history 重建 messages 中的用户上下文。
         """
-        summary = self.ctx.session_summary
-        keep_tail = 5  # 保留最近 N 条消息（保留当前轮 tool-call 链上下文）
-
-        # 保留 system + 最近 keep_tail 条非 system 消息
         head = [m for m in self.messages if m.role == "system"]
-        tail = self.messages[-keep_tail:] if len(self.messages) > keep_tail else []
-        tail = [m for m in tail if m.role != "system"]
+        tail = self.messages[turn_start_idx:] if turn_start_idx < len(self.messages) else []
+        # 跳过第一条（turn_start_idx 处的原始 user 消息，已被 new_context 替代），
+        # 仅保留其后的 assistant / tool 消息
+        tail = [m for m in tail[1:] if m.role != "system"]
 
-        # 摘要作为单独的 user 消息，当前消息放最后
+        new_context = self.ctx.build_user_context(user_message)
+
+        if self.ctx.session_summary:
+            new_context = (
+                "=== 历史摘要 ===\n"
+                + self.ctx.session_summary
+                + "\n\n"
+                + new_context
+            )
+
         self.messages = head + [
-            Message(role="user", content=f"=== 压缩历史摘要 ===\n{summary}"),
-        ] + tail + [
-            Message(role="user", content=user_message),
+            Message(role="user", content=new_context),
+        ] + tail
+
+    def _emergency_compress(self, user_message: str) -> None:
+        """紧急压缩：API 上下文溢出且无旁路摘要时，用 LLM 做一次全量压缩。
+        """
+        non_system = [m for m in self.messages if m.role != "system"]
+        full_context = "\n\n".join(
+            f"[{m.role}] {m.content}" for m in non_system
+        )
+
+        prompt = (
+            "请对以下对话进行压缩总结，总结压缩成为模型可参考的历史对话信息，要着重保留用户意图、当前进度、关键结果、已经解决的问题，"
+            "以及正在进行还未完成的工作，历史对话为：\n\n"
+            f"{full_context}"
+        )
+
+        try:
+            result = self._summarize(prompt)
+        except Exception:
+            return
+
+        if result:
+            self.ctx.session_summary = result
+            # 全量压缩已覆盖全部历史，清空 turn_history 避免 _rebuild_messages
+            # 中 build_user_context 再次输出完整原文造成冗余
+            self.ctx.turn_history.clear()
+            self.ctx._pending_compress.clear()
+            self._rebuild_messages(user_message, self._turn_start_idx)
+
+    @staticmethod
+    def _looks_like_context_overflow(error: Exception) -> bool:
+        """判断 API 错误是否由上下文溢出导致。"""
+        msg = str(error).lower()
+        overflow_keywords = [
+            "context length", "context too long", "maximum context",
+            "token limit", "too many tokens", "context window",
+            "reduce", "truncate", "max_tokens",
         ]
-        # 不更新 turn_start_idx，因为替换后 user 消息位置可能变化，但后续只需
-        # session_summary 已参与交互，本轮后续检测不会再重复触发
+        return any(kw in msg for kw in overflow_keywords)
 
     def interrupt(self) -> None:
         """请求中断当前循环，优雅的打断"""

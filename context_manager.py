@@ -44,6 +44,7 @@ class ContextManager:
     # MAX_RECENT_TURNS = 8               # 保留最近 N 轮完整记录
     INCREMENTAL_COMPRESS_INTERVAL = 4  # 每 N 轮触发一次增量压缩
     MAX_SESSION_SUMMARY_CHARS = 60000   # session_summary 最大字符数，超限触发 LLM 二次压缩
+    KEEP_RECENT_TURNS = 2              # 截断时至少保留的未压缩轮数
 
     def __init__(self, summarizer: Optional[Callable[[str], str]] = None):
         self.turn_history: List[TurnRecord] = []
@@ -124,28 +125,21 @@ class ContextManager:
 
     def build_user_context(self, user_message: str) -> str:
         """构建用户消息（拼接全部对话历史）。
-        若无历史轮次且无 session_summary，直接返回原始消息。
+
+        不主动前置摘要——摘要仅在超阈值压缩时由 _rebuild_messages 注入。
+        正常流程保留完整上下文，确保压缩前模型能看到全部细节。
+
         Args:
             user_message: 用户当前输入
         Returns:
-            包含全部历史轮次和当前输入的组合文本
+            全部历史轮次 + 当前输入的组合文本；首轮直接返回原始消息
         """
-        if not self.turn_history and not self.session_summary:
+        if not self.turn_history:
             return user_message
 
-        parts = []
-
-        # 优先展示 session_summary（/resume 恢复的会话历史或压缩摘要）
-        if self.session_summary:
-            parts.append(self.session_summary.rstrip())
-            if self.turn_history:
-                parts.append("")
-
-        if self.turn_history:
-            parts.append("=== 对话历史 ===")
-            for t in self.turn_history:
-                parts.append(self._format_turn(t))
-
+        parts = ["=== 对话历史 ==="]
+        for t in self.turn_history:
+            parts.append(self._format_turn(t))
         parts.append("")
         parts.append("=== 当前消息 ===")
         parts.append(user_message)
@@ -165,6 +159,27 @@ class ContextManager:
     def build_compression_context(self) -> str:
         """构建压缩用的结构化上下文，保留用户意图、关键行为、关键结果。"""
         return self.get_session_summary()
+
+    def truncate_compressed_turns(self) -> bool:
+        """移除已被增量压缩过的旧轮次，只保留未被压缩的最近轮次。
+
+        当 session_summary 存在时，turn_history 中已被压缩进摘要的轮次可以安全移除。
+        保留策略：_pending_compress 中的轮次精确代表"尚未被旁路压缩"的轮次，
+        保留它们即可。若 pending 为空（极端情况），用 KEEP_RECENT_TURNS 兜底。
+
+        Returns:
+            True 如果发生了截断
+        """
+        if not self.session_summary:
+            return False
+
+        pending_count = len(self._pending_compress)
+        keep_count = pending_count if pending_count > 0 else self.KEEP_RECENT_TURNS
+        if len(self.turn_history) <= keep_count:
+            return False
+
+        self.turn_history = self.turn_history[-keep_count:]
+        return True
 
     # 内部辅助
     @staticmethod
