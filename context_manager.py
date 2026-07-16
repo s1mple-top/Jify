@@ -43,7 +43,7 @@ class ContextManager:
     # 常量
     # MAX_RECENT_TURNS = 8               # 保留最近 N 轮完整记录
     INCREMENTAL_COMPRESS_INTERVAL = 4  # 每 N 轮触发一次增量压缩
-    MAX_SESSION_SUMMARY_CHARS = 60000   # session_summary 最大字符数，超限触发 LLM 二次压缩
+    MAX_SESSION_SUMMARY_CHARS = 120000   # session_summary 最大字符数，超限触发 LLM 二次压缩
     KEEP_RECENT_TURNS = 2              # 截断时至少保留的未压缩轮数
 
     def __init__(self, summarizer: Optional[Callable[[str], str]] = None):
