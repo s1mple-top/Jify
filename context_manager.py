@@ -162,13 +162,6 @@ class ContextManager:
 
     def truncate_compressed_turns(self) -> bool:
         """移除已被增量压缩过的旧轮次，只保留未被压缩的最近轮次。
-
-        当 session_summary 存在时，turn_history 中已被压缩进摘要的轮次可以安全移除。
-        保留策略：_pending_compress 中的轮次精确代表"尚未被旁路压缩"的轮次，
-        保留它们即可。若 pending 为空（极端情况），用 KEEP_RECENT_TURNS 兜底。
-
-        Returns:
-            True 如果发生了截断
         """
         if not self.session_summary:
             return False
@@ -218,12 +211,6 @@ class ContextManager:
 
     def _do_incremental_compress(self, pending_turns: List[TurnRecord]) -> None:
         """增量压缩：基于当前 session_summary 追加新轮次信息。
-
-        读取当前 session_summary（而非入队时快照），确保包含之前批次
-        已完成的压缩结果。由于只有本线程写 session_summary，无需 CAS。
-
-        Args:
-            pending_turns: 入队时的 _pending_compress 快照
         """
         new_turns_text = "\n\n".join(
             self._format_turn(t) for t in pending_turns
@@ -269,10 +256,8 @@ class ContextManager:
 
     def _llm_compress(self, prompt: str) -> str:
         """通过 summarizer 调用 LLM 压缩文本（全量二次压缩，安全兜底用）。
-
         Args:
             prompt: 待压缩文本
-
         Returns:
             压缩后文本；若 summarizer 不可用或失败则返回原文
         """
