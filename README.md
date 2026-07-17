@@ -81,11 +81,12 @@ jify gateway --port 9090
 ### 插件系统
 
 通过 Hook 机制扩展 Agent 行为。插件放置在 `~/.jify/plugins/`，支持的生命周期钩子包括 `before_prompt_build`、`after_prompt_build`、`llm_input`、`before_api_call`、`after_api_call`、`before_tool_call`、`after_tool_call`、`llm_output` 等。
+
 亦可通过插件系统注册自定义Tool
 
 ### MCP 支持
 
-内置 MCP (Model Context Protocol) 客户端，通过 `mcp_servers.json` 配置文件集成外部工具服务。
+内置 MCP (Model Context Protocol) 客户端，通过 `~/.jify/mcp_servers.json` 配置文件集成外部工具服务。
 
 ### 模型配置
 
