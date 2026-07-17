@@ -38,7 +38,7 @@ def _build_whitelist_schemas() -> list:
 @register_tool(
     name="subagent_run",
     description=(
-        "启动一个协程级子智能体执行任务。subagent 只能使用: "
+        "启动一个子智能体执行任务。subagent 只能使用: "
         "read_file, write_file, patch_file, exec, static_analysis。"
         "subagent 复用主 Agent 的模型连接，在同一进程内同步执行，完成后自动销毁。"
     ),
@@ -62,7 +62,7 @@ def _build_whitelist_schemas() -> list:
 )
 def subagent_run(task: str, max_iterations: int = 20) -> str:
     """
-    启动协程级 subagent 执行指定任务。
+    启动 subagent 执行指定任务。
 
     subagent 与主 Agent 共享 model_client，通过 contextvars 隔离工具白名单，
     执行完毕后栈帧销毁，无残留进程。

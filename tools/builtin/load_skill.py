@@ -52,7 +52,7 @@ def load_skill(skill_name: str) -> str:
     local_meta_json_path = local_skill_dir / "_meta.json"
 
     # 构建 OpenClaw skill 目录路径
-    openclaw_skills_dir = Path("/Users/s1mple/.openclaw/workspace/skills")
+    openclaw_skills_dir = Path(os.path.expanduser("~/.openclaw/workspace/skills"))
     openclaw_skill_dir = openclaw_skills_dir / skill_name
     openclaw_skill_md_path = openclaw_skill_dir / "SKILL.md"
 
