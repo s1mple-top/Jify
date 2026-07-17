@@ -44,6 +44,7 @@ jify --think-stream
 
 首次运行会自动创建 `~/.jify/` 目录并生成默认配置。
 
+你可以在任何目录下执行jify启动jify
 
 ## CLI 命令
 
@@ -58,7 +59,7 @@ jify --think-stream
 | `/help` | 显示帮助信息 |
 | `/hook` | 显示已加载的 Hook |
 | `/skill` | 列出可用 Skill |
-| `/jify` | 分析当前项目，生成 Jify.md |
+| `/jify` | 分析当前工作目录(cwd)下的项目，生成 Jify.md |
 | `/exit` | 退出程序 |
 
 
