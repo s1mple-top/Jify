@@ -175,21 +175,49 @@ def _discover_skills() -> list[dict[str, str]]:
         for skill_path in openclaw_skills_dir.iterdir():
             if not skill_path.is_dir():
                 continue
-            skill_md_path = skill_path / "SKILL.md"
-            if not skill_md_path.exists():
-                continue
-            try:
-                with open(skill_md_path, 'r', encoding='utf-8') as f:
-                    lines = [next(f, '') for _ in range(6)]
-                content = ''.join(lines)
-                name_match = re.search(r'name:\s*(\S+)', content)
-                if name_match:
-                    name = name_match.group(1)
-                    desc_match = re.search(r'description:\s*(.+)', content)
-                    description = desc_match.group(1).strip() if desc_match else ""
-                    skills.append({name: description})
-            except (IOError, UnicodeDecodeError):
-                continue
+            meta_json_path = skill_path / "_meta.json"
+            skill_json_path = skill_path / "skill.json"
+            name, description = "", ""
+
+            if meta_json_path.exists():
+                try:
+                    meta_data = json.loads(meta_json_path.read_text(encoding="utf-8"))
+                    name = meta_data.get("slug", "")
+                    description = meta_data.get("description", "")
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+            if not name and skill_json_path.exists():
+                try:
+                    skill_data = json.loads(skill_json_path.read_text(encoding="utf-8"))
+                    name = skill_data.get("name", "")
+                    description = skill_data.get("description", "")
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+            # 回退：解析 SKILL.md 的 YAML frontmatter
+            if not name:
+                skill_md_path = skill_path / "SKILL.md"
+                if not skill_md_path.exists():
+                    continue
+                try:
+                    with open(skill_md_path, 'r', encoding='utf-8') as f:
+                        lines = [next(f, '') for _ in range(20)]
+                    content = ''.join(lines)
+                    # 提取 YAML frontmatter 块: "---\nname: xxx\ndescription: yyy\n---..."
+                    fm_match = re.match(r'^---\s*\n(.*?)\n---', content, re.DOTALL)
+                    if fm_match:
+                        frontmatter = fm_match.group(1)
+                        name_match = re.search(r'^name:\s*(.+)', frontmatter, re.MULTILINE)
+                        if name_match:
+                            name = name_match.group(1).strip()
+                            desc_match = re.search(r'^description:\s*(.+)', frontmatter, re.MULTILINE)
+                            description = desc_match.group(1).strip() if desc_match else ""
+                except (IOError, UnicodeDecodeError):
+                    continue
+
+            if name:
+                skills.append({name: description})
 
     return skills
 

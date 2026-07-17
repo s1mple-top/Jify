@@ -25,7 +25,7 @@ class CLIConsole:
     _MIN_DRAIN_CAP = 50
     _MAX_DRAIN_CAP = 150
     _DRAIN_RATIO = 0.2
-    _STREAM_STALL_TIMEOUT = 1500 #
+    _STREAM_STALL_TIMEOUT = 15 #
 
     def __init__(self, think_stream: bool = False) -> None:
         self.token_num = 0
@@ -324,6 +324,7 @@ class CLIConsole:
                         recv_est = stats.get("recv_est", 0)
                         token_str = ""
                         if sent_est:
+                            # 初期架构设计的缺陷，暂时使用预估的token计数
                             token_str += f" · ↑ {OutputEngine.fmt_tokens(sent_est // 2)} tokens"
                         if recv_est:
                             token_str += f" · ↓ {OutputEngine.fmt_tokens(recv_est // 2)} tokens"

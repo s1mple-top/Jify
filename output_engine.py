@@ -358,6 +358,7 @@ class OutputEngine:
             symbol = {"pending": "○", "running": "⏳", "completed": "✓", "failed": "✗"}.get(status, "⏳")
             token_info = ""
             if sent_est:
+                # 初期的架构设计缺陷，暂时使用预估token计数
                 token_info += f" · ↑ {self.fmt_tokens(sent_est // 2)} tokens"
             if recv_est:
                 token_info += f" · ↓ {self.fmt_tokens(recv_est // 2)} tokens"
