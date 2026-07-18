@@ -74,6 +74,17 @@ DEFAULT_MCP_SERVERS_JSON = """\
       "enabled": false
     },
     {
+      "name": "amap-maps",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y","@amap/amap-maps-mcp-server"],
+      "env": {
+        "AMAP_MAPS_API_KEY": "xxx"
+      },
+      "timeout": 30,
+      "enabled": false
+    },
+    {
       "name": "example-sse-server",
       "transport": "sse",
       "url": "http://localhost:8080/sse",
