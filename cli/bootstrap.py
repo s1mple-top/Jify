@@ -52,12 +52,13 @@ max_workers: 8
 tool_timeout: 20.0
 
 # 网关管理员 token
-admin_token: "jify-admin-2024"
+admin_token: "jify-admin-2026"
 
 # 插件系统
 plugins_dir: ~/.jify/plugins
 enabled_plugins:
   - hello_world
+  - hook_demo
 """
 
 DEFAULT_MCP_SERVERS_JSON = """\
@@ -83,6 +84,137 @@ DEFAULT_MCP_SERVERS_JSON = """\
 }
 """
 
+HELLO_WORLD_PLUGIN_JSON = """\
+{
+  "name": "hello_world",
+  "version": "1.0.0",
+  "description": "示例插件：演示 Jify 插件系统的基本用法",
+  "author": "s1mple",
+  "type": ["tool"]
+}
+"""
+
+HELLO_WORLD_TOOLS_PY = """\
+# -*- coding: utf-8 -*-
+\"\"\"hello_world 插件 — 演示如何用 @register_tool 注册新工具\"\"\"
+
+from tools.registry import register_tool
+
+
+@register_tool(
+    name="hello_world",
+    description="A demo tool from the hello_world plugin. Returns a greeting with the current time.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Name to greet (default: 'World')"
+            }
+        },
+        "required": [],
+    },
+    parallel_safe=True,
+    # requires_approval=False,
+)
+def hello_world(name: str = "World") -> str:
+
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return f"Hello, {name}! (from hello_world plugin @ {now} created by XY)"
+"""
+
+HOOK_DEMO_PLUGIN_JSON = """\
+{
+  "name": "hook_demo",
+  "version": "1.0.0",
+  "description": "演示 hook 插件系统：在所有 8 个 hook 点打印日志",
+  "author": "s1mple",
+  "type": ["hook"]
+}
+"""
+
+HOOK_DEMO_HOOKS_PY = """\
+# -*- coding: utf-8 -*-
+
+'''
+Hook 注册函数
+'''
+
+
+def before_prompt_build(context):
+    \"\"\"system prompt 构建前触发\"\"\"
+    # print("before_prompt_build")
+    return context
+
+
+def after_prompt_build(context):
+    \"\"\"messages 组装完毕触发\"\"\"
+    # print("after_prompt_build")
+    pass
+
+
+def llm_input(context):
+    \"\"\"每轮发送给模型前触发\"\"\"
+    # print("llm_input")
+    pass
+
+
+def before_api_call(context):
+    \"\"\"API 调用前触发\"\"\"
+    # model = context.get("model", "?")
+    # msg_content = len(context.get("api_messages", []))
+    # msg_content = context.get("api_messages", [])
+    # print("before_api_call",msg_content)
+    pass
+
+
+def after_api_call(context):
+    \"\"\"API 调用后触发\"\"\"
+    # print("after_api_call",model)
+    pass
+
+
+def before_tool_call(context):
+    \"\"\"工具执行前触发\"\"\"
+    # print("before_tool_call",name)
+    # return {"block":True,"reason":"此工具调用被拦截"}
+    pass
+
+
+def after_tool_call(context):
+    \"\"\"工具执行后触发\"\"\"
+    # name = context.get("tool_name", "?")
+    # result = context.get("result")
+    # error = context.get("error", False)
+    # status = "ERROR" if error else "OK"
+    # print("after_tool_call",name,result)
+    pass
+
+
+def llm_output(context):
+    \"\"\"最终输出前触发\"\"\"
+    # resp_len = len(context.get("final_response", ""))
+    # print("llm_output",resp_len)
+    pass
+"""
+
+def _write_default_plugins() -> None:
+    """在 ~/.jify/plugins/ 下创建内置默认插件。"""
+    plugins_dir = JIFY_HOME / "plugins"
+
+    # hello_world
+    hw_dir = plugins_dir / "hello_world"
+    hw_dir.mkdir(exist_ok=True)
+    (hw_dir / "plugin.json").write_text(HELLO_WORLD_PLUGIN_JSON, encoding="utf-8")
+    (hw_dir / "tools.py").write_text(HELLO_WORLD_TOOLS_PY, encoding="utf-8")
+
+    # hook_demo
+    hd_dir = plugins_dir / "hook_demo"
+    hd_dir.mkdir(exist_ok=True)
+    (hd_dir / "plugin.json").write_text(HOOK_DEMO_PLUGIN_JSON, encoding="utf-8")
+    (hd_dir / "hooks.py").write_text(HOOK_DEMO_HOOKS_PY, encoding="utf-8")
+
 
 def ensure_jify_home() -> None:
     """确保 ~/.jify 目录及其基础文件结构存在。"""
@@ -100,3 +232,6 @@ def ensure_jify_home() -> None:
     # 创建子目录
     for sub in ("plugins", "self_evolution", "skills"):
         (JIFY_HOME / sub).mkdir(exist_ok=True)
+
+    # 写入内置默认插件
+    _write_default_plugins()
