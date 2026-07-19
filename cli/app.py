@@ -9,7 +9,6 @@ import os
 import queue
 import random
 import re
-import select
 import textwrap
 import threading
 import sys
@@ -37,7 +36,6 @@ from agent_p2p import (
     build_prompt_from_message,
 )
 from output_engine import JifyTheme
-from tools.approval import termios_lock
 from cli.console import CLIConsole
 from .bootstrap import ensure_jify_home
 
@@ -531,10 +529,12 @@ def meta(text: str) -> None:
 # 主 REPL
 def read_input(prompt: str = "> ") -> str:
     global _paste_buffers
+    sys.stdout.write("\033[?25h")
+    sys.stdout.flush()
     try:
         return _cli_session.prompt(prompt, wrap_lines=True)
     except (EOFError, KeyboardInterrupt):
-        _paste_buffers = []  # 非正常退出时清理粘贴占位符，防止污染下次输入
+        _paste_buffers = []
         return ""
 
 
