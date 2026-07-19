@@ -129,11 +129,11 @@ def _discover_skills() -> list[dict[str, str]]:
                 except (json.JSONDecodeError, IOError):
                     pass
 
-            if not name and skill_json_path.exists():
+            if (not name or not description) and skill_json_path.exists():
                 try:
                     skill_data = json.loads(skill_json_path.read_text(encoding="utf-8"))
-                    name = skill_data.get("name", "")
-                    description = skill_data.get("description", "")
+                    name = skill_data.get("name", "") or name
+                    description = skill_data.get("description", "") or description
                 except (json.JSONDecodeError, IOError):
                     continue
 
@@ -158,11 +158,11 @@ def _discover_skills() -> list[dict[str, str]]:
                 except (json.JSONDecodeError, IOError):
                     pass
 
-            if not name and skill_json_path.exists():
+            if (not name or not description) and skill_json_path.exists():
                 try:
                     skill_data = json.loads(skill_json_path.read_text(encoding="utf-8"))
-                    name = skill_data.get("name", "")
-                    description = skill_data.get("description", "")
+                    name = skill_data.get("name", "") or name
+                    description = skill_data.get("description", "") or description
                 except (json.JSONDecodeError, IOError):
                     continue
 
@@ -196,7 +196,7 @@ def _discover_skills() -> list[dict[str, str]]:
                     pass
 
             # 回退：解析 SKILL.md 的 YAML frontmatter
-            if not name:
+            if not name or not description:
                 skill_md_path = skill_path / "SKILL.md"
                 if not skill_md_path.exists():
                     continue
