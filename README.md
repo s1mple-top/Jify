@@ -1,7 +1,7 @@
 # Jify
 
 
-Jify Agent（Self-evolving harness Agent）是一款通用智能体，运行在您自己的设备上的个人 AI 助手。它可以帮你完成您需要的编程任务、安全排查
+Jify Agent（Self-evolving harness Agent）是一款通用智能体，运行在您自己的设备上的个人 AI 助手。它可以帮你完成您需要的编程任务、安全排查、CTF
 
 
 https://github.com/user-attachments/assets/68095fbc-9af2-4019-b8d9-512a754b2d6d
