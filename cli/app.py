@@ -574,8 +574,8 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
     console.print()
     console.print(Text(" 1. Use Jify to help with vibecoding", style=JifyTheme.SUBTLE))
     console.print(Text(" 2. Run /resume to resume your conversation", style=JifyTheme.SUBTLE))
-    console.print(Text(" 3. Run /jify to create a Jify.md file with instructions for Jify", style=JifyTheme.SUBTLE))
-    console.print(Text(" 4. Jify can evolve on its own. Please experience it as time goes by", style=JifyTheme.SUBTLE))
+    console.print(Text(" 3. Jify can evolve on its own. Please experience it as time goes by", style=JifyTheme.SUBTLE))
+    console.print(Text(" 4. Run /jify to analyze the project in your current directory and generate a Jify.md file", style=JifyTheme.SUBTLE))
     console.print()
     divider()
 
