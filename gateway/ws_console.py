@@ -173,7 +173,7 @@ class WebSocketConsole:
 
         tool_executor.shutdown(wait=False)
 
-        return complete_text, tool_call_chunks, finish_reason, pre_results, fired_signatures
+        return complete_text, tool_call_chunks, finish_reason, pre_results
 
     # 流式预执行 _fire_tool（对齐 CLIConsole）
 
