@@ -875,7 +875,9 @@ body {
       case 'thinking_start':
         setStatus('thinking', '思考中...');
         if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
-        if (!currentMsgEl) currentMsgEl = addAssistant();
+        // 始终创建新消息气泡，避免 thinking 内容串扰到旧消息
+        if (currentMsgEl) { currentMsgEl.classList.remove('streaming'); }
+        currentMsgEl = addAssistant();
         rawMarkdown = '';
         break;
       case 'thinking':
@@ -985,6 +987,11 @@ body {
     }
 
     addUser(text);
+    // 发送新消息前重置状态，确保后续事件定位到新的消息气泡
+    if (currentMsgEl) { currentMsgEl.classList.remove('streaming'); }
+    currentMsgEl = null;
+    thinkingEl = null;
+    rawMarkdown = '';
     ws.send(JSON.stringify({ type: 'chat', content: text }));
     input.value = '';
     input.style.height = 'auto';
