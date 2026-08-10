@@ -11,14 +11,15 @@
 调用线程阻塞在 Future 上等待审批结果。
 """
 import json
+import os
 import queue
 import select
 import shutil
 import sys
+import time
 from concurrent.futures import Future
 import termios
 import threading
-from os import wait
 from typing import Optional
 
 from rich.panel import Panel
@@ -164,12 +165,15 @@ def _read_approval_choice(tool_name: str, timeout: float = 120.0) -> bool:
     try:
         # 先排空所有待输出内容，确保 Panel / prompt 已传输到终端
         sys.stdout.flush()
+        # tcdrain 等待内核输出缓冲区排空，防止 Live 大量 ANSI 输出积压
+        # 导致终端驱动在切换模式后无法正常处理输入
         with termios_lock:
+            termios.tcdrain(fd)
             _canonical = termios.tcgetattr(fd)
-            _canonical[3] |= termios.ECHO | termios.ICANON
-            # TCSANOW 立即切换模式（不等输出排空），紧接 TCIFLUSH 清残余 raw 输入。
-            # 避免 TCSAFLUSH 的输出排空窗口内用户 Enter 被当作 raw 字节刷掉。
+            _canonical[0] |= termios.ICRNL                 # iflag: CR→NL，确保 Enter 键被识别
+            _canonical[3] |= termios.ECHO | termios.ICANON # lflag: 规范模式 + 回显
             termios.tcsetattr(fd, termios.TCSANOW, _canonical)
+        time.sleep(0.08)  # 等待终端稳定，确保 ANSI 转义码处理完毕
         termios.tcflush(fd, termios.TCIFLUSH)
 
         while True:
@@ -181,7 +185,7 @@ def _read_approval_choice(tool_name: str, timeout: float = 120.0) -> bool:
             termios.tcflush(fd, termios.TCIFLUSH)
 
             try:
-                rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+                rlist, _, _ = select.select([fd], [], [], timeout)
             except (KeyboardInterrupt, ValueError):
                 print("\n  [审批] 输入中断，默认拒绝")
                 return False
@@ -191,15 +195,18 @@ def _read_approval_choice(tool_name: str, timeout: float = 120.0) -> bool:
                 raise ApprovalBreak(tool_name)
 
             try:
-                choice = sys.stdin.readline()
-            except (EOFError, KeyboardInterrupt):
+                raw = os.read(fd, 4096)
+            except (EOFError, KeyboardInterrupt, OSError):
                 print("\n  [审批] 输入中断，默认拒绝")
                 return False
 
-            if not choice:  # EOF
+            if not raw:
                 print("\n  [审批] 输入中断，默认拒绝")
                 return False
 
+            choice = raw.decode('utf-8', errors='replace')
+            if '\n' in choice:
+                choice = choice.split('\n')[0]
             choice = choice.strip().lower()
 
             if not choice:

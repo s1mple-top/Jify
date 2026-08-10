@@ -8,6 +8,7 @@ import math
 import random
 import re
 import threading
+import termios
 import time
 from typing import Dict, Optional
 
@@ -444,6 +445,10 @@ class OutputEngine:
         import sys
         self._console.file.flush()
         sys.stdout.flush()
+        try:
+            termios.tcdrain(sys.stdout.fileno())
+        except termios.error:
+            pass
         # _input_active 由 main_loop 唯一控制，finalize 不再越权重置
         self._stream_buffer = ""
         self._session_start_time = 0.0
