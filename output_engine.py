@@ -543,10 +543,13 @@ class OutputEngine:
         self._anim_thread.start()
 
     def _stop_animation(self) -> None:
+        if self._anim_thread is None:
+            return
         self._anim_stop.set()
-        if self._anim_thread is not None:
-            self._anim_thread.join(timeout=0.5)
-            self._anim_thread = None
+        with self._anim_lock:
+            pass
+        self._anim_thread.join(timeout=1.0)
+        self._anim_thread = None
 
     def init_anim_state(self, sent: int, recv: int, sent_target_delta: int) -> None:
         with self._anim_lock:
@@ -579,6 +582,12 @@ class OutputEngine:
 
     def set_input_active(self, active: bool) -> None:
         self._input_active.set() if active else self._input_active.clear()
+
+    def prepare_for_input(self) -> None:
+        with self._anim_lock:
+            import sys
+            sys.stdout.write("\033[?25h")
+            sys.stdout.flush()
 
     def _flush_pending(self) -> None:
         with self._anim_lock:

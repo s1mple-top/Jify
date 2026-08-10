@@ -25,10 +25,11 @@ class SkillSuggestion:
     name: str = ""
     description: str = ""
     trigger_pattern: str = ""
-    steps: str = ""                 # 可执行的工作流步骤描述
+    steps: str = ""                 # methodology → 思维框架/检查清单；workflow → 可执行步骤
     tools_used: List[str] = field(default_factory=list)
     frequency: int = 0
     created_at: str = ""
+    skill_type: str = "workflow"    # "methodology"(思路，可横移) | "workflow"(经验，绑定具体栈)
 
 
 class SkillDetector:
@@ -80,6 +81,7 @@ class SkillDetector:
                     tools_used=item.get("tools_used", []),
                     frequency=item.get("frequency", 0),
                     created_at=item.get("created_at", ""),
+                    skill_type=item.get("skill_type", "workflow"),
                 )
                 self.suggestions.append(s)
         except (json.JSONDecodeError, IOError):
@@ -97,6 +99,7 @@ class SkillDetector:
                 "tools_used": s.tools_used,
                 "frequency": s.frequency,
                 "created_at": s.created_at,
+                "skill_type": s.skill_type,
             })
         data = {
             "suggestions": suggestions_data,
@@ -129,16 +132,56 @@ class SkillDetector:
 
 
     # 技能检测
-    DETECTION_PROMPT = """你是一个编程工作流分析器。你的任务是检测用户反复执行的**可复用操作流程**，
-并将其抽象为可被直接执行的 skill。
+    # methodology 专用于漏洞挖掘类任务，workflow 用于非漏洞挖掘的可复用行为范式
+    DETECTION_PROMPT = """你是一个工作流与方法论分析器。你的任务是从用户与 Jify 的协作历史中，检测可沉淀的 skill。
+根据任务的性质，分为以下两种类型，**请按各自的标准分别判断**：
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-什么是 skill（必须全部满足）：
+Skill 的两种类型
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. **可执行** — 有明确的 Step 1 → Step 2 → ... 步骤序列，换一个人照着做也能完成
-2. **跨场景复用** — 不是一次性的，类似场景出现 2 次以上
-3. **涉及工具调用** — 至少 2 个工具参与
-4. **有固定范式** — 工具使用顺序和参数模式相对固定
+
+1. 方法论型（methodology）— **仅用于漏洞挖掘 / 安全审计类任务**
+   定义：一套可横移的漏洞挖掘思考框架 / 审计思路 / 检查清单，不绑定具体技术栈。
+
+   什么时候用 methodology：
+   - 任务涉及漏洞挖掘、渗透测试、代码审计、逆向分析、安全评估
+   - 用户反复表现出某种可套用到不同目标的漏洞挖掘或安全审计思路
+
+   可横移测试：把这套思路套到另一个技术栈（Java → Android、Python → Node、Web → 客户端/二进制），
+   核心逻辑是否依然成立？成立 → methodology。
+
+   好：name="component-vuln-hunting"，description="组件/依赖漏洞挖掘思路：枚举组件与版本 → 匹配公开 CVE → 无公开漏洞时审计危险 sink → 构造 PoC 验证"
+      → Java 框架适用，横移到 Android 组件、npm 包、Go module 同样成立
+   好：name="injection-verify-loop"，description="注入类漏洞验证思路：无害 payload 探测回显/时序 → 确认注入点 → 判定漏洞类型 → 无副作用 PoC 确认"
+      → 不绑定具体语言与框架
+
+   输出要求：steps 写「思维框架 / 检查清单」，**禁止写具体命令、具体 API、具体文件路径**。
+
+2. 流程型（workflow）— **用于非漏洞挖掘类的可复用行为范式**
+   定义：用户反复执行的某种可复用操作范式，不一定是绑定具体技术栈，关键在于「行为模式可复用」。
+
+   什么时候用 workflow：
+   - 任务**不涉及**漏洞挖掘 / 安全审计
+   - 用户反复执行某类操作，且行为模式具备复用价值
+   - 不限定具体领域 —— 可以是代码管理（如同步远程仓库）、部署流程、文件批处理、项目初始化、数据处理流水线、文档生成、测试自动化等任何反复出现的操作范式
+   - 关键判断标准：**用户是否多次做了"同一类事情"**，而不在于用了什么工具或栈
+
+   好：name="sync-github-remote"，description="同步 GitHub 远程代码：pull 最新代码 → 解决冲突 → 运行测试 → push"
+   好：name="batch-file-refactor"，description="批量文件重构：扫描目标文件 → 逐个应用修改 → 验证语法 → 统一提交"
+   好：name="project-scaffold"，description="项目脚手架初始化：创建目录结构 → 安装依赖 → 配置 lint/format → 初始化 git"
+   好：name="data-pipeline-run"，description="数据处理流水线：拉取数据源 → 清洗格式化 → 运行分析脚本 → 输出报告 → 归档结果"
+
+   注意：以上只是示例，workflow 应覆盖**任何领域**的可复用行为范式，不要局限于代码管理类操作。
+
+   输出要求：steps 写分步指令，标注每一步用什么工具、做什么操作。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+判断流程（务必遵守）：
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. 先判断任务是否属于「漏洞挖掘 / 安全审计」类
+   - 是 → 尝试抽象为 methodology（可横移的漏洞挖掘思路），抽象不出则不产出
+   - 否 → 判断是否有「可复用的行为范式」，有则产出为 workflow
+2. 同一组任务历史中，两种类型可以同时产出（如果既有漏洞挖掘任务又有其他可复用范式）
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 什么**不是** skill（绝对不要提取）：
@@ -147,20 +190,8 @@ class SkillDetector:
 - 一次性操作（只改了一个文件，只跑了一条命令）
 - 临时调试/修 bug（每次场景不同，不具备复用模板）
 - 话题摘要（「用户和我讨论了 UI 压缩」→ 这不是 skill）
-- 泛泛的最佳实践（「应该先读文件再改」→ 太泛，没有具体步骤）
-- 没有具体执行步骤的概念（描述了一个领域但写不出怎么做）
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-好 skill vs 坏 skill 对比：
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 坏: name="llm-compress-summary", description="用户讨论了 LLM 压缩上下文的方法"
-   → 这是一个**话题摘要**，没有可执行步骤
-
- 好: name="code-review-flow", description="代码审查工作流：读取变更 → 静态分析 → 跑测试 → 输出报告"
-   → 有明确的 4 步操作序列，可以直接执行
-
- 好: name="deploy-staging", description="部署到测试环境：运行测试 → 构建 → 推送 → SSH 重启服务"
-   → 4 步操作链条，部署场景通用
+- 空泛口号（「应该先读文件再改」→ 既没有可复用思维框架，也没有具体步骤）
+- 绑定单一 API 的扫描技巧（除非能抽象出可横移的审计思路）
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 任务历史（用户意图 + 执行成果）：
@@ -176,20 +207,22 @@ class SkillDetector:
 {{
   "patterns": [
     {{
-      "name": "skill 英文 slug（如 code-review-flow）",
+      "skill_type": "methodology 或 workflow",
+      "name": "skill 英文 slug（如 component-vuln-hunting）",
       "description": "一句话描述这个 skill 做什么（中文）",
-      "trigger_pattern": "什么场景触发（如：用户要求审查代码）",
-      "steps": "分步执行指令，每步标注工具名和做什么",
+      "trigger_pattern": "什么场景触发（如：用户要求审计某个组件/框架的安全性）",
+      "steps": "methodology → 思维框架/检查清单；workflow → 分步指令（每步标注工具名和做什么）",
       "tools_used": ["read_file", "static_analysis", "exec"]
     }}
   ]
 }}
 
 关键要求：
+- skill_type 必须是 "methodology" 或 "workflow"
+- methodology **仅限漏洞挖掘 / 安全审计场景**，steps 写可横移的思维框架，禁止写具体 API/命令/路径
+- workflow 用于非漏洞挖掘的可复用行为范式，steps 写具体分步指令
 - name 用英文 slug，必须反映**做什么**而不是**讨论了什么**
-- steps 是核心——必须写清每个步骤具体做什么、用什么工具、产出什么
-- 如果写不出明确可执行的步骤 → 说明这不是一个合格的 skill → 不要输出
-- 如果没有发现合格的工作流 → 输出 {{"patterns": []}}"""
+- 如果没有发现合格的 skill → 输出 {{"patterns": []}}"""
 
     def detect(self) -> List[Dict[str, Any]]:
         """从累计任务中检测可执行的工作流模式
@@ -197,18 +230,12 @@ class SkillDetector:
         Returns:
             检测到的 skill 建议列表
         """
-        if not self.summarizer or len(self._pending_tasks) < 5:
+        if not self.summarizer:
             return []
 
-        # 只取有工具调用的任务（纯对话暂时不构成 skill）
-        tool_tasks = [t for t in self._pending_tasks[-30:] if t.get("tools")]
-        if len(tool_tasks) < 3:
-            return []
-
-        # 构建任务摘要：含用户意图 + agent 执行成果
         tasks_lines = []
-        for t in tool_tasks[-20:]:
-            tools_str = " → ".join(t["tools"]) if t["tools"] else "无"
+        for t in self._pending_tasks[-20:]:
+            tools_str = " → ".join(t["tools"]) if t.get("tools") else "无"
             outcome = t.get("outcome", "")
             if outcome:
                 outcome = outcome[:200]
@@ -221,7 +248,7 @@ class SkillDetector:
             )
         tasks_text = "\n".join(tasks_lines)
 
-        # 已有建議 + 拒绝名单（让 LLM 不再输出同名建议）
+        # 已有建议 + 拒绝名单（让 LLM 不再输出同名建议）
         existing = json.dumps(
             [{"name": s.name, "description": s.description} for s in self.suggestions],
             ensure_ascii=False
@@ -262,6 +289,9 @@ class SkillDetector:
             name = p.get("name", "")
             if not name:
                 continue
+            skill_type = p.get("skill_type", "workflow")
+            if skill_type not in ("methodology", "workflow"):
+                skill_type = "workflow"
 
             # 检查是否已存在
             existing_names = {s.name for s in self.suggestions}
@@ -271,6 +301,7 @@ class SkillDetector:
                         s.frequency += 1
                         s.steps = p.get("steps", s.steps)
                         s.tools_used = p.get("tools_used", s.tools_used)
+                        s.skill_type = skill_type
                         changed = True
                         # 不在此处落盘，改为入待审队列，由 CLI 下一轮对话前弹窗确认
                         break
@@ -283,6 +314,7 @@ class SkillDetector:
                     tools_used=p.get("tools_used", []),
                     frequency=1,
                     created_at=now,
+                    skill_type=skill_type,
                 ))
                 changed = True
 

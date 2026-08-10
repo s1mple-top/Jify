@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from typing import Optional, Callable, Dict, Any, List
 from enum import Enum
 
+from skill_verifier import verify_skill_async
+
 
 class TaskPhase(Enum):
     PROFILE = "profile"           # 用户画像提取
@@ -81,7 +83,7 @@ class SelfEvolutionEngine:
         self._experience_max_gap: int = 10   # 最多 N 轮强制触发一次（上限保护）
 
         # 触发间隔（每 M 轮检测一次技能模式）
-        self._skill_interval: int = 10  # 每 10 轮检测一次
+        self._skill_interval: int = 6   # 每 6 轮检测一次
 
 
     # 公开接口
@@ -383,10 +385,17 @@ class SelfEvolutionEngine:
         return self._skill_detector.get_pending_approval()
 
     def approve_skill(self, name: str) -> bool:
-        """审批通过一个 skill，落盘 SKILL.md"""
+        """审批通过一个 skill，落盘 SKILL.md + 旁路验证"""
         if self._skill_detector is None:
             return False
-        return self._skill_detector.approve(name)
+        ok = self._skill_detector.approve(name)
+        if ok:
+            # 旁路验证：不阻塞主 loop
+            try:
+                verify_skill_async(name)
+            except Exception:
+                pass
+        return ok
 
     def reject_skill(self, name: str) -> bool:
         """拒绝一个 skill，加入黑名单不再弹窗"""

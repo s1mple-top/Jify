@@ -526,11 +526,137 @@ def meta(text: str) -> None:
     console.print(Text(text, style=f"italic {JifyTheme.SUBTLE}"))
 
 
+# ── Skill 低使用率检测 ──
+_LOW_USAGE_DAYS = 5
+_LOW_USAGE_THRESHOLD = 7
+_USAGE_FILE = Path(os.path.expanduser("~/.jify/skills/usage.json"))
+_SKILLS_DIR = Path(os.path.expanduser("~/.jify/skills"))
+
+
+def _check_low_usage_skills() -> List[str]:
+    """检查 ~/.jify/skills/ 下使用量过低的 skill。
+    
+    判定条件：
+      - skill 首次加载距今超过 _LOW_USAGE_DAYS 天
+      - 且加载次数 < _LOW_USAGE_THRESHOLD
+
+    对于从未被加载过的 skill（usage.json 中无记录），以目录创建时间作为"首次可用"时间。
+    
+    Returns:
+        低使用率的 skill 名称列表
+    """
+    now = datetime.now()
+    low_skills: List[str] = []
+
+    # 读取使用量数据
+    usage_data: Dict = {}
+    if _USAGE_FILE.exists():
+        try:
+            usage_data = json.loads(_USAGE_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    for skill_dir in _SKILLS_DIR.iterdir():
+        if not skill_dir.is_dir():
+            continue
+        skill_name = skill_dir.name
+
+        if skill_name in usage_data:
+            entry = usage_data[skill_name]
+            first_str = entry.get("first_loaded")
+            load_count = entry.get("load_count", 0)
+            # first_loaded 为 null（同步后从未 load 过），以目录 mtime 作为可用起始
+            if not first_str:
+                first_str = datetime.fromtimestamp(skill_dir.stat().st_mtime).isoformat()
+        else:
+            # 兜底：usage.json 中不存在（理论上 sync 后不会走到这里）
+            first_str = datetime.fromtimestamp(skill_dir.stat().st_mtime).isoformat()
+            load_count = 0
+
+        try:
+            first_dt = datetime.fromisoformat(first_str)
+        except (ValueError, TypeError):
+            continue
+
+        days_since = (now - first_dt).days
+        if days_since >= _LOW_USAGE_DAYS and load_count < _LOW_USAGE_THRESHOLD:
+            low_skills.append(skill_name)
+
+    return low_skills
+
+
+def _sync_usage_file() -> None:
+    """确保 usage.json 包含所有已安装 skill，未使用的 skill 以 load_count=0 占位。
+
+    在 Jify 启动时调用，保证 usage.json 是 skill 目录的完整镜像。
+    """
+    from config.system_prompt import _discover_skills
+
+    # 发现所有已安装 skill 的名称
+    discovered = _discover_skills()
+    discovered_names: set = set()
+    for d in discovered:
+        discovered_names.update(d.keys())
+
+    # 读取现有 usage.json
+    usage: Dict = {}
+    if _USAGE_FILE.exists():
+        try:
+            usage = json.loads(_USAGE_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    changed = False
+
+    # 新 skill：添加占位条目
+    for name in sorted(discovered_names):
+        if name not in usage:
+            usage[name] = {
+                "first_loaded": None,
+                "last_loaded": None,
+                "load_count": 0,
+            }
+            changed = True
+
+    # 已删除的 skill：清理
+    removed = [name for name in usage if name not in discovered_names]
+    for name in removed:
+        del usage[name]
+        changed = True
+
+    if changed:
+        _USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _USAGE_FILE.write_text(
+            json.dumps(usage, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+
+def _show_low_usage_warning() -> None:
+    """在启动时展示低使用率 skill 提醒"""
+    low = _check_low_usage_skills()
+    if not low:
+        return
+
+    console.print()
+    console.print(
+        Text(" Low-usage skill warning:", style=f"bold #f0a040"),
+    )
+    console.print(
+        Text(f"   (less than {_LOW_USAGE_THRESHOLD} uses in {_LOW_USAGE_DAYS} days)", style=JifyTheme.SUBTLE),
+    )
+    for name in sorted(low):
+        console.print(
+            Text(f"   - {name}", style=JifyTheme.ACCENT),
+        )
+    console.print(
+        Text("   Run /skill to review; delete unused ones to stay organized.", style=JifyTheme.SUBTLE),
+    )
+    console.print()
+
+
 # 主 REPL
 def read_input(prompt: str = "> ") -> str:
     global _paste_buffers
-    sys.stdout.write("\033[?25h")
-    sys.stdout.flush()
     try:
         return _cli_session.prompt(prompt, wrap_lines=True)
     except (EOFError, KeyboardInterrupt):
@@ -545,11 +671,25 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
     agent_cli = JifyCLI(think_stream, safe_exec)
     agent_cli.start_mcp_async()
 
+    # 同步 skill 使用记录（启动时确保 usage.json 覆盖所有已安装 skill）
+    _sync_usage_file()
+
     # Banner
     name = getattr(agent_cli, '_p2p_name', 'Jify')
     cwd = os.getcwd()
     config = agent_cli.config
     W = 49  # content width inside box borders
+
+    # 读取 skill 使用统计 (逐条列出)
+    skill_usage_lines: List[str] = []
+    if _USAGE_FILE.exists():
+        try:
+            usage_data = json.loads(_USAGE_FILE.read_text(encoding="utf-8"))
+            for name in sorted(usage_data.keys()):
+                count = usage_data[name].get("load_count", 0)
+                skill_usage_lines.append(f"{name} : {count}")
+        except (json.JSONDecodeError, IOError):
+            pass
 
     def _box(content="", indent=3) -> Text:
         line = f"{' ' * indent}{content}".ljust(W)
@@ -568,8 +708,19 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
     console.print(_box())
     console.print(_box("• API Base URL:"))
     console.print(_box(config.base_url or "(not set)", indent=3))
+    console.print(_box())
+    console.print(_box("Skills:", indent=1))
+    if skill_usage_lines:
+        for line in skill_usage_lines:
+            console.print(_box(line, indent=5))
+    else:
+        console.print(_box("(none)", indent=5))
     console.print(Text(f"╰{'─' * W}╯", style=JifyTheme.ACCENT))
     console.print()
+
+    # 低使用率 skill 提醒
+    _show_low_usage_warning()
+
     console.print(Text(" Tips for getting started:", style=f"bold {JifyTheme.ACCENT}"))
     console.print()
     console.print(Text(" 1. Use Jify to help with vibecoding", style=JifyTheme.SUBTLE))
@@ -608,6 +759,7 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
                 console.print()
                 console.print(Text("  [A]ccept  [R]eject  [D]efer (跳过)", style=JifyTheme.SUBTLE))
                 agent_cli.cli_console.set_input_active(True)
+                agent_cli.cli_console.prepare_for_input()
                 choice = read_input("  skill >     ")
                 agent_cli.cli_console.set_input_active(False)
 
@@ -625,6 +777,7 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
                 divider()
 
             agent_cli.cli_console.set_input_active(True)
+            agent_cli.cli_console.prepare_for_input()
             user_input = read_input("> ")
             agent_cli.cli_console.set_input_active(False)
 

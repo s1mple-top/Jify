@@ -15,6 +15,7 @@ import yaml
 
 from tools.registry import register_tool
 from event_bus import UIEvent, event_bus
+from skill_verifier import verify_skill_async
 
 # 常量
 SKILLS_DIR = Path(os.path.expanduser("~/.jify/skills"))
@@ -188,6 +189,12 @@ def skill_create(action: str, name: str, content: str = "") -> str:
 
         event_bus.put(UIEvent("TEXT", f"* skill_create: created '{name}'"))
 
+        # 旁路验证：不阻塞主 loop
+        try:
+            verify_skill_async(name)
+        except Exception:
+            pass
+
         return json.dumps(
             {
                 "success": True,
@@ -223,6 +230,12 @@ def skill_create(action: str, name: str, content: str = "") -> str:
         _write_meta_json(name, fm.get("description", ""))
 
         event_bus.put(UIEvent("TEXT", f"* skill_create: edited '{name}'"))
+
+        # 旁路验证：不阻塞主 loop
+        try:
+            verify_skill_async(name)
+        except Exception:
+            pass
 
         return json.dumps(
             {

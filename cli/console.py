@@ -44,6 +44,9 @@ class CLIConsole:
         self._output = OutputEngine()
         self.set_input_active = self._output.set_input_active
 
+    def prepare_for_input(self) -> None:
+        self._output.prepare_for_input()
+
     @property
     def _model_phase(self) -> str:
         return self._output.model_phase
