@@ -246,8 +246,10 @@ class CLIConsole:
                             tool_call_chunks[idx]["id"] = tc.id
                         if tc.name:
                             tool_call_chunks[idx]["function"]["name"] = tc.name
+                            token_recv += len(tc.name)
                         if tc.arguments:
                             tool_call_chunks[idx]["function"]["arguments"] += tc.arguments
+                            token_recv += len(tc.arguments)
 
                     current_indices = {tc.index for tc in chunk.tool_call_deltas}
                     for cidx in list(tool_call_chunks.keys()):
