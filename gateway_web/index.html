@@ -1296,7 +1296,7 @@ body {
     setTimeout(function() { $('stop-btn').disabled = false; }, 2000);
   };
   $('msg-input').onkeydown = function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       send();
     }

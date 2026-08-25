@@ -506,12 +506,7 @@ class AgentLoop:
                 tool_calls=tool_calls,
             ))
 
-            event_bus.put(UIEvent("Token_Send", len(str(Message(
-                role="assistant",
-                content=text_content or "",
-                reasoning_content=console.last_reasoning_content,
-                tool_calls=tool_calls,
-            )))))
+            event_bus.put(UIEvent("Token_Send", len(text_content or "") // 2))
 
             # 清空 reasoning_content，下轮 consume_stream 会重新填充
             console.last_reasoning_content = ""
