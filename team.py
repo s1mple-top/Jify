@@ -35,6 +35,22 @@ def get_output_engine() -> Any:
     return _output_engine
 
 
+def _emit_team_update(worker_id: Optional[str], info: Optional[Dict], clear: bool = False) -> None:
+    """将 team 状态投递到 event_bus，供 WebUI 订阅（CLI 仍通过 OutputEngine 状态行渲染）。
+
+    gateway 模式下没有 OutputEngine（get_output_engine() 返回 None），此前 team
+    状态会完全丢失；统一在此发射事件，让 WebSocketConsole 通过 event_bus 透传到前端。
+    """
+    try:
+        event_bus.put(UIEvent("team_update", {
+            "worker_id": worker_id,
+            "info": info,
+            "clear": clear,
+        }))
+    except Exception:
+        pass
+
+
 
 # 数据结构
 @dataclass
@@ -106,17 +122,18 @@ class TeamWorker:
         engine = get_output_engine()
 
         def _on_progress(event_type: str, data: Dict) -> None:
-            if not engine:
-                return
             if event_type == "tool_start":
                 tool_counter[0] += 1
-            status = "running"
-            engine.set_team_worker(self.worker_id, {
+            info = {
                 "task": task_snippet,
                 "_start": start_time,
                 "tool_uses": tool_counter[0],
-                "status": status,
-            })
+                "status": "running",
+            }
+            _emit_team_update(self.worker_id, info)
+            if not engine:
+                return
+            engine.set_team_worker(self.worker_id, info)
 
         return _on_progress
 
@@ -215,6 +232,12 @@ class TeamWorker:
         task_snippet = task.content[:42] + "…" if len(task.content) > 42 else task.content
 
         engine = get_output_engine()
+        _emit_team_update(self.worker_id, {
+            "task": task_snippet,
+            "_start": start,
+            "tool_uses": 0,
+            "status": "running",
+        })
         if engine:
             engine.set_team_worker(self.worker_id, {
                 "task": task_snippet,
@@ -255,6 +278,12 @@ class TeamWorker:
                     "tool_uses": tool_counter[0],
                     "status": task.status,
                 })
+            _emit_team_update(self.worker_id, {
+                "task": task_snippet,
+                "_start": start,
+                "tool_uses": tool_counter[0],
+                "status": task.status,
+            })
 
         return json.dumps({
             "worker_id": self.worker_id,
@@ -431,6 +460,9 @@ class TeamLeader:
                 engine.set_team_worker(wid, { # set 到状态栏
                     "task": snippet, "elapsed": 0, "tool_uses": 0, "status": "running",
                 })
+            _emit_team_update(wid, {
+                "task": snippet, "elapsed": 0, "tool_uses": 0, "status": "running",
+            })
 
         # 提交到线程池
         raw_results: Dict[str, str] = {}
@@ -470,6 +502,7 @@ class TeamLeader:
 
         if engine:
             engine.clear_team_workers()
+        _emit_team_update(None, None, clear=True)
 
         summary = f"✓ Team 任务全部完成: {total_tool_uses} tool uses · {total_elapsed:.1f}s"
         event_bus.put(UIEvent("TEXT", summary))

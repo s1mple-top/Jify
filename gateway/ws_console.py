@@ -8,6 +8,7 @@ from typing import Dict, Optional, Any
 
 from fastapi import WebSocket
 from jify_tool import registry as jf_registry
+from event_bus import event_bus
 
 
 class WebSocketConsole:
@@ -25,6 +26,7 @@ class WebSocketConsole:
         self._stream_buffer = ""
         self._model_phase = "idle"
         self._outgoing: queue.Queue = queue.Queue()
+        self.event_bus = event_bus
 
     # AgentLoop.run() 要求的接口
 
@@ -49,14 +51,69 @@ class WebSocketConsole:
     def _send(self, msg: dict):
         self._outgoing.put(msg)
 
+    def drain_events(self):
+        """优雅地清空 event_bus 里的内容，防止上一会话事件泄漏到下一会话。"""
+        while True:
+            try:
+                self.event_bus.get_nowait()
+            except queue.Empty:
+                break
+
     async def drain_outgoing(self):
-        """一次排空所有积压消息（由 asyncio 侧定期调用）"""
+        """一次排空所有积压消息（由 asyncio 侧定期调用）。
+
+        顺序：先转发 consume_stream 产生的主消息流，再转发 event_bus 里的
+        结构化事件（todo / diff / text / message / error / team_update）。这样
+        工具线程、agent_loop 投递到 event_bus 的能力（CLI 已消费）也能透传到
+        前端，避免断层。
+        """
         while True:
             try:
                 msg = self._outgoing.get_nowait()
                 await self.ws.send_json(msg)
             except queue.Empty:
                 break
+
+        while True:
+            try:
+                ev = self.event_bus.get_nowait()
+                payload = self._translate_event(ev)
+                if payload:
+                    await self.ws.send_json(payload)
+            except queue.Empty:
+                break
+
+    def _translate_event(self, ev) -> Optional[dict]:
+        """把 event_bus 的 UIEvent 翻译成前端可渲染的 ws 消息。
+
+        对齐 CLIConsole._drain_sent_events 的消费语义；Token_Send 等纯计数事件
+        在此消费掉但不转发（WebUI 暂不需要 token 动画）。
+        """
+        ev_type = getattr(ev, 'type', '')
+        if ev_type == 'todo_update':
+            return {"type": "todo_update", "todos": ev.data}
+        if ev_type == 'DIFF':
+            return {"type": "diff", "content": str(ev.data)}
+        if ev_type == 'TEXT':
+            data_str = str(ev.data)
+            if data_str.startswith('* preparing '):
+                return None
+            return {"type": "text", "content": data_str}
+        if ev_type == 'MESSAGE':
+            return {"type": "message", "content": str(ev.data)}
+        if ev_type == 'ERROR':
+            return {"type": "error", "content": str(ev.data)}
+        if ev_type == 'team_update':
+            data = ev.data if isinstance(ev.data, dict) else {}
+            return {
+                "type": "team_update",
+                "worker_id": data.get("worker_id"),
+                "info": data.get("info"),
+                "clear": data.get("clear", False),
+            }
+        if ev_type == 'workflow_step':
+            return {"type": "workflow_step", "data": ev.data}
+        return None
 
     # 同步 consume_stream（接口对齐 CLIConsole）
 

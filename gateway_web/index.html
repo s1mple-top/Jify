@@ -378,6 +378,84 @@ body {
 }
 .tool-msg .result:empty::after { content: '执行中...'; color: #a0907a; }
 
+/* Todo panel */
+.todo-panel {
+  margin: 10px 0 10px 54px;
+  background: #fff;
+  border: 1px solid #e8ddcc;
+  border-left: 3px solid #b45309;
+  border-radius: 8px;
+  padding: 10px 14px;
+  max-width: 68%;
+}
+.todo-panel .todo-head {
+  font-size: 12px; font-weight: 700; color: #b45309;
+  margin-bottom: 8px;
+}
+.todo-panel .todo-count {
+  color: #a0907a; font-weight: 600; margin-left: 6px;
+}
+.todo-item {
+  display: flex; align-items: baseline; gap: 6px;
+  font-size: 12px; color: #4a4235;
+  padding: 2px 0;
+}
+.todo-icon { flex-shrink: 0; font-size: 12px; }
+.todo-content { flex: 1; line-height: 1.5; }
+.todo-priority {
+  font-size: 10px; color: #a0907a;
+  border: 1px solid #e8ddcc; border-radius: 4px;
+  padding: 0 5px; flex-shrink: 0;
+}
+
+/* Diff card */
+.diff-card {
+  margin: 10px 0 10px 54px;
+  background: #faf5ed;
+  border: 1px solid #e8ddcc;
+  border-left: 3px solid #b45309;
+  border-radius: 8px;
+  padding: 10px 14px;
+  max-width: 88%;
+  overflow: hidden;
+}
+.diff-card .diff-head {
+  font-size: 12px; font-weight: 700; color: #b45309;
+  margin-bottom: 6px;
+}
+.diff-card .diff-body {
+  margin: 0;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px; line-height: 1.5;
+  color: #4a4235;
+  white-space: pre-wrap; word-break: break-all;
+  max-height: 240px; overflow-y: auto;
+}
+
+/* Team panel */
+.team-panel {
+  margin: 10px 0 10px 54px;
+  background: #fff;
+  border: 1px solid #e8ddcc;
+  border-left: 3px solid #b45309;
+  border-radius: 8px;
+  padding: 10px 14px;
+  max-width: 68%;
+}
+.team-panel .team-head {
+  font-size: 12px; font-weight: 700; color: #b45309;
+  margin-bottom: 8px;
+}
+.team-item {
+  display: flex; align-items: baseline; gap: 6px;
+  font-size: 12px; color: #4a4235;
+  padding: 2px 0;
+}
+.team-symbol { flex-shrink: 0; }
+.team-id { font-weight: 600; color: #92400e; flex-shrink: 0; }
+.team-task { flex: 1; line-height: 1.5; }
+.team-meta { font-size: 10px; color: #a0907a; flex-shrink: 0; }
+
 /* Thinking indicator */
 .think-indicator {
   margin: 8px 0 8px 54px;
@@ -758,6 +836,10 @@ body {
   var chatEl = document.getElementById('chat');
   var emptyState = chatEl.querySelector('.empty-state');
   var hasMessages = false;
+  var todoPanel = null;
+  var teamPanel = null;
+  var teamWorkers = {};
+  var lastDoneContent = '';
 
   function $(id) { return document.getElementById(id); }
 
@@ -831,6 +913,89 @@ body {
     chatEl.appendChild(div);
     scrollDown();
     return div;
+  }
+
+  var TODO_ICON = { completed: '\u2611', in_progress: '\u25d0', pending: '\u2610', cancelled: '\u2717' };
+  var TODO_COLOR = { completed: '#16a34a', in_progress: '#f59e0b', pending: '#8b7355', cancelled: '#dc2626' };
+  var PRIORITY_LABEL = { high: '\u9ad8', medium: '\u4e2d', low: '\u4f4e' };
+  var TEAM_SYMBOL = { pending: '\u25cb', running: '\u23f3', completed: '\u2713', failed: '\u2717' };
+
+  function renderTodo(todos) {
+    if (!todos || !todos.length) {
+      if (todoPanel) { todoPanel.remove(); todoPanel = null; }
+      return;
+    }
+    if (!todoPanel) {
+      todoPanel = document.createElement('div');
+      todoPanel.className = 'todo-panel';
+      chatEl.appendChild(todoPanel);
+    }
+    var order = { high: 0, medium: 1, low: 2 };
+    var sorted = todos.slice().sort(function(a, b) {
+      return (order[a.priority] || 2) - (order[b.priority] || 2);
+    });
+    var done = todos.filter(function(t) { return t.status === 'completed'; }).length;
+    var rows = sorted.map(function(t) {
+      var icon = TODO_ICON[t.status] || '\u2610';
+      var color = TODO_COLOR[t.status] || '#8b7355';
+      var pl = PRIORITY_LABEL[t.priority] || '';
+      return '<div class="todo-item">' +
+        '<span class="todo-icon" style="color:' + color + '">' + icon + '</span>' +
+        '<span class="todo-content">' + esc(t.content) + '</span>' +
+        (pl ? '<span class="todo-priority">' + pl + '</span>' : '') +
+        '</div>';
+    }).join('');
+    todoPanel.innerHTML =
+      '<div class="todo-head">\u4efb\u52a1\u5217\u8868 <span class="todo-count">' + done + '/' + todos.length + '</span></div>' +
+      rows;
+    scrollDown();
+  }
+
+  function addDiffCard(content) {
+    var div = addMsg(
+      '<div class="diff-card"><div class="diff-head">\u4ee3\u7801\u53d8\u66f4</div><pre class="diff-body"></pre></div>',
+      ''
+    );
+    div.querySelector('.diff-body').textContent = content || '';
+    return div;
+  }
+
+  function renderTeam(workerId, info, clear) {
+    if (clear) {
+      if (teamPanel) { teamPanel.remove(); teamPanel = null; }
+      teamWorkers = {};
+      return;
+    }
+    if (info) {
+      teamWorkers[workerId] = info;
+    } else {
+      delete teamWorkers[workerId];
+    }
+    var ids = Object.keys(teamWorkers);
+    if (!ids.length) {
+      if (teamPanel) { teamPanel.remove(); teamPanel = null; }
+      return;
+    }
+    if (!teamPanel) {
+      teamPanel = document.createElement('div');
+      teamPanel.className = 'team-panel';
+      chatEl.appendChild(teamPanel);
+    }
+    var rows = ids.map(function(id) {
+      var w = teamWorkers[id] || {};
+      var task = w.task || '';
+      var status = w.status || 'running';
+      var symbol = TEAM_SYMBOL[status] || '\u23f3';
+      var toolUses = w.tool_uses || 0;
+      return '<div class="team-item">' +
+        '<span class="team-symbol">' + symbol + '</span>' +
+        '<span class="team-id">' + esc(id) + '</span>' +
+        '<span class="team-task">' + esc(task) + '</span>' +
+        '<span class="team-meta">' + toolUses + ' tools</span>' +
+        '</div>';
+    }).join('');
+    teamPanel.innerHTML = '<div class="team-head">\u56e2\u961f\u534f\u4f5c</div>' + rows;
+    scrollDown();
   }
 
   function esc(text) {
@@ -920,7 +1085,8 @@ body {
         }
         break;
       case 'done':
-        setStatus('compressing', '整理记忆...');
+        lastDoneContent = data.content || '';
+        setStatus('compressing', '\u6574\u7406\u8bb0\u5fc6...');
         if (currentMsgEl) {
           currentMsgEl.classList.remove('streaming');
           var c = currentMsgEl.querySelector('.content');
@@ -937,6 +1103,23 @@ body {
       case 'error':
         addSystem('&#9888; ' + (data.content || 'Unknown error'));
         break;
+      case 'todo_update':
+        renderTodo(data.todos);
+        break;
+      case 'diff':
+        addDiffCard(data.content || '');
+        break;
+      case 'team_update':
+        renderTeam(data.worker_id, data.info, data.clear);
+        break;
+      case 'message':
+        if (data.content && data.content !== lastDoneContent) {
+          addSystem(data.content);
+        }
+        break;
+      case 'text':
+        addSystem(data.content || '');
+        break;
       case 'interrupted':
         addSystem('&#9208; 已中断');
         if (currentMsgEl) { currentMsgEl.classList.remove('streaming'); currentMsgEl = null; }
@@ -944,6 +1127,10 @@ body {
         break;
       case 'cleared':
         chatEl.innerHTML = '';
+        todoPanel = null;
+        teamPanel = null;
+        teamWorkers = {};
+        lastDoneContent = '';
         emptyState = document.createElement('div');
         emptyState.className = 'empty-state';
         emptyState.innerHTML = '<div class="big-icon">&#9889;</div><h3>Jify 已就绪</h3><p>我能帮你做什么?</p>';

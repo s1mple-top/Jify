@@ -63,12 +63,33 @@ def _get_or_create_session(user_id: str) -> GatewaySession:
         if user_id not in _sessions:
             config = AgentConfig.load_from_yaml()
             agent = AgentLoop(agent_config=config)
+            _ensure_team_initialized(agent, config)
             _sessions[user_id] = GatewaySession(
                 user_id=user_id,
                 agent=agent,
                 console=None,
             )
         return _sessions[user_id]
+
+
+def _ensure_team_initialized(agent: AgentLoop, config) -> None:
+    """初始化 Team 模式（对齐 cli/app.py 的 JifyCLI.__init__）。
+
+    gateway 此前只创建 AgentLoop，未注册 TeamLeader，导致模型调用任意 team_*
+    工具都拿到 "Team 模式未启动" 错误。team 是进程内全局单例（team.set_leader /
+    get_leader 用模块级变量），故仅在尚未注册时初始化一次，避免重复 new session
+    时覆盖 leader 导致旧 worker 线程泄漏。
+    """
+    from team import TeamOrchestrator, set_leader, get_leader
+
+    if get_leader() is not None:
+        return
+    try:
+        orch = TeamOrchestrator(agent.model_client, config)
+        set_leader(orch.leader)
+    except Exception:
+        # 与顶部 plugin loader 一致：team 初始化失败不应阻断 gateway 启动
+        pass
 
 
 # 页面路由
@@ -283,6 +304,8 @@ async def websocket_endpoint(ws: WebSocket):
             })
 
     agent.clear_history()
+    # 清空上一会话残留的 event_bus 事件（todo/diff/message 等），避免跨会话泄漏
+    console.drain_events()
 
     _drain_stop = threading.Event()
 
