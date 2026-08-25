@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
 
 import yaml
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -52,9 +52,11 @@ except Exception:
 
 @dataclass
 class GatewaySession:
+    session_id: str
     user_id: str
     agent: AgentLoop
     console: Any
+    title: str = ""
     messages: list = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
@@ -63,18 +65,35 @@ _sessions: Dict[str, GatewaySession] = {}
 _sessions_lock = threading.Lock()
 
 
-def _get_or_create_session(user_id: str) -> GatewaySession:
+def _create_session(user_id: str) -> GatewaySession:
+    config = AgentConfig.load_from_yaml()
+    agent = AgentLoop(agent_config=config)
+    _ensure_team_initialized(agent, config)
+    session_id = uuid.uuid4().hex
+    session = GatewaySession(
+        session_id=session_id,
+        user_id=user_id,
+        agent=agent,
+        console=None,
+    )
+    _sessions[session_id] = session
+    return session
+
+
+def _get_or_create_session(user_id: str, session_id: Optional[str] = None) -> GatewaySession:
     with _sessions_lock:
-        if user_id not in _sessions:
-            config = AgentConfig.load_from_yaml()
-            agent = AgentLoop(agent_config=config)
-            _ensure_team_initialized(agent, config)
-            _sessions[user_id] = GatewaySession(
-                user_id=user_id,
-                agent=agent,
-                console=None,
-            )
-        return _sessions[user_id]
+        if session_id and session_id in _sessions:
+            session = _sessions[session_id]
+            if session.user_id == user_id:
+                return session
+        return _create_session(user_id)
+
+
+def _list_sessions(user_id: str) -> list:
+    with _sessions_lock:
+        items = [s for s in _sessions.values() if s.user_id == user_id]
+        items.sort(key=lambda s: s.created_at)
+        return items
 
 
 def _ensure_team_initialized(agent: AgentLoop, config) -> None:
@@ -277,6 +296,54 @@ async def api_logout(token: str = __import__('fastapi').Query(...)):
     return {"ok": ok}
 
 
+# 会话管理 REST API（按 user 隔离）
+
+@app.get("/api/sessions")
+async def api_list_sessions(token: str = Query(...)):
+    user_id = _validate_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未授权：无效或过期的 token")
+    sessions = _list_sessions(user_id)
+    return {
+        "sessions": [
+            {
+                "id": s.session_id,
+                "title": s.title or "新会话",
+                "created_at": s.created_at,
+            }
+            for s in sessions
+        ]
+    }
+
+
+@app.post("/api/sessions")
+async def api_create_session(token: str = Query(...)):
+    user_id = _validate_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未授权：无效或过期的 token")
+    with _sessions_lock:
+        session = _create_session(user_id)
+    return {"id": session.session_id, "title": session.title or "新会话"}
+
+
+@app.delete("/api/sessions/{session_id}")
+async def api_delete_session(session_id: str, token: str = Query(...)):
+    user_id = _validate_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未授权：无效或过期的 token")
+    with _sessions_lock:
+        session = _sessions.get(session_id)
+        if not session or session.user_id != user_id:
+            raise HTTPException(status_code=404, detail="会话不存在")
+        # 删除前保存，避免丢消息
+        try:
+            session.agent.save_conversation()
+        except Exception:
+            pass
+        del _sessions[session_id]
+    return {"ok": True}
+
+
 # WebSocket 端点
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
@@ -289,9 +356,13 @@ async def websocket_endpoint(ws: WebSocket):
         return
     await ws.accept()
     console = WebSocketConsole(ws)
-    session = _get_or_create_session(user_id)
+    session_id = ws.query_params.get("session_id", "")
+    session = _get_or_create_session(user_id, session_id)
     session.console = console
     agent = session.agent
+
+    # 通知前端当前绑定会话（首次连接无 session_id 时由后端新建并回传 id）
+    await ws.send_json({"type": "session_ready", "session_id": session.session_id, "title": session.title or "新会话"})
 
     system_prompt = _build_system_prompt()
 
@@ -308,8 +379,8 @@ async def websocket_endpoint(ws: WebSocket):
                 },
             })
 
-    agent.clear_history()
-    # 清空上一会话残留的 event_bus 事件（todo/diff/message 等），避免跨会话泄漏
+    # 多会话下每个会话保留独立历史，连接时不再 clear_history；
+    # 仅清空上一会话残留的 event_bus 事件（todo/diff/message 等），避免跨会话泄漏
     console.drain_events()
 
     _drain_stop = threading.Event()
@@ -340,6 +411,11 @@ async def websocket_endpoint(ws: WebSocket):
                 user_message = data.get("content", "").strip()
                 if not user_message:
                     continue
+
+                # 首次消息时生成会话标题
+                if not session.title:
+                    session.title = user_message[:20]
+                    await ws.send_json({"type": "session_title", "session_id": session.session_id, "title": session.title})
 
                 from tools.approval import clear_break
                 clear_break()
@@ -377,18 +453,6 @@ async def websocket_endpoint(ws: WebSocket):
             elif msg_type == "interrupt":
                 agent.interrupt()
                 await ws.send_json({"type": "interrupted"})
-
-            elif msg_type == "new":
-                # 保存当前会话 → 清除历史 → 通知前端
-                session_id = agent.save_conversation()
-                agent.clear_history()
-                content = f"本次全程对话已保存，session_id: {session_id}" if session_id else "本次对话无内容，无需保存"
-                await ws.send_json({
-                    "type": "session_saved",
-                    "session_id": session_id,
-                    "content": content,
-                })
-                await ws.send_json({"type": "status", "phase": "idle", "text": "就绪"})
 
             elif msg_type == "clear":
                 agent.clear_history()

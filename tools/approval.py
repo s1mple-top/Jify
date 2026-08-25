@@ -248,11 +248,10 @@ def _read_approval_choice(tool_name: str, timeout: float = 120.0) -> bool:
 
         while True:
             prompt = f"  Approve [{tool_name}]? [Enter] yes / [n]o / [b]reak: "
+            # 先清上一轮残留，再写 prompt；避免清掉用户对当前 prompt 的抢先输入
+            termios.tcflush(fd, termios.TCIFLUSH)
             sys.stdout.write(prompt)
             sys.stdout.flush()
-
-            # Flush any leftover input before blocking on select
-            termios.tcflush(fd, termios.TCIFLUSH)
 
             try:
                 rlist, _, _ = select.select([fd], [], [], timeout)

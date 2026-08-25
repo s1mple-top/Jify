@@ -68,6 +68,53 @@ body {
 #config-summary { margin-top: 4px; font-size: 11px; color: #8b7355; }
 #sidebar .info-block.active #config-summary { color: rgba(255,255,255,.8); }
 
+/* Session list */
+#chat-nav { display: flex; align-items: center; gap: 6px; }
+#chat-nav .info-block { flex: 1; }
+#new-session-btn {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #b45309, #c45d1d);
+  color: #fff; border: none;
+  cursor: pointer; font-size: 18px; line-height: 1; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  transition: all .15s;
+  box-shadow: 0 2px 6px rgba(180,83,9,.2);
+  flex-shrink: 0;
+}
+#new-session-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(180,83,9,.3); }
+#session-list {
+  margin-bottom: 14px;
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 4px;
+}
+#session-list:empty { display: none; }
+.session-item {
+  font-size: 12px; color: #8b7355;
+  padding: 7px 10px;
+  background: #fff;
+  border: 1px solid #e8ddcc;
+  border-radius: 8px;
+  cursor: pointer; user-select: none;
+  display: flex; align-items: center; gap: 6px;
+  transition: all .15s;
+  white-space: nowrap; overflow: hidden;
+}
+.session-item:hover { background: #fdf0dd; border-color: #d4c5a9; }
+.session-item.active {
+  background: linear-gradient(135deg, #b45309, #c45d1d);
+  color: #fff; border-color: #b45309;
+}
+.session-item .s-title { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.session-item .s-del {
+  opacity: 0; flex-shrink: 0;
+  width: 16px; height: 16px; line-height: 16px; text-align: center;
+  border-radius: 4px; font-size: 13px;
+}
+.session-item:hover .s-del { opacity: .7; }
+.session-item .s-del:hover { opacity: 1; background: rgba(0,0,0,.18); }
+
 /* Skills Panel */
 #skills-panel {
   display: none; flex: 1; overflow-y: auto;
@@ -630,7 +677,11 @@ body {
 <div id="sidebar">
   <h2>&#9889; Jify </h2>
   <div class="subtitle">交互式编程助手</div>
-  <div class="info-block active" id="nav-chat" onclick="switchView('chat')">聊天</div>
+  <div id="chat-nav">
+    <div class="info-block active" id="nav-chat" onclick="switchView('chat')">聊天</div>
+    <button id="new-session-btn" onclick="newSession()" title="新建会话">＋</button>
+  </div>
+  <div id="session-list"></div>
   <div class="info-block" id="skills-block" onclick="switchView('skills')">
     <div class="label">Skills</div>
     <div id="skills-list">加载中...</div>
@@ -717,6 +768,13 @@ body {
   var skillsData = [];
   var pluginsData = [];
   var configData = {};
+
+  // 多会话状态
+  var sessions = [];           // [{id, title}]
+  var activeSessionId = null;
+  var sessionHtmlCache = {};   // {id: html}
+  var switching = false;
+  var running = false;
 
   // 加载 skills 列表
   fetch('/api/skills')
@@ -1105,14 +1163,141 @@ body {
     return d.innerHTML;
   }
 
-  function connect() {
+  // ── 多会话管理 ──
+  function renderSessionList() {
+    var list = document.getElementById('session-list');
+    if (!list) return;
+    if (!sessions.length) { list.innerHTML = ''; return; }
+    list.innerHTML = sessions.map(function(s) {
+      var cls = (s.id === activeSessionId) ? 'session-item active' : 'session-item';
+      return '<div class="' + cls + '" onclick="switchToSession(\'' + esc(s.id) + '\')">' +
+        '<span class="s-title">' + esc(s.title || '新会话') + '</span>' +
+        '<span class="s-del" onclick="event.stopPropagation();deleteSession(\'' + esc(s.id) + '\')">&times;</span>' +
+        '</div>';
+    }).join('');
+  }
+
+  function updateSessionTitle(id, title) {
+    for (var i = 0; i < sessions.length; i++) {
+      if (sessions[i].id === id) { sessions[i].title = title; break; }
+    }
+    renderSessionList();
+  }
+
+  function saveCurrentSessionHtml() {
+    if (activeSessionId) {
+      sessionHtmlCache[activeSessionId] = chatEl.innerHTML;
+    }
+  }
+
+  function resetChat(html) {
+    chatEl.innerHTML = html || '';
+    var es = chatEl.querySelector('.empty-state');
+    if (!es) {
+      es = document.createElement('div');
+      es.className = 'empty-state';
+      es.innerHTML = '<div class="big-icon">⚡</div><h3>Jify 已就绪</h3><p>我能帮你做什么?</p>';
+      chatEl.appendChild(es);
+    }
+    emptyState = es;
+    hasMessages = false;
+    var children = chatEl.children;
+    for (var i = 0; i < children.length; i++) {
+      if (children[i] !== es) { hasMessages = true; break; }
+    }
+    emptyState.style.display = hasMessages ? 'none' : '';
+    currentMsgEl = null;
+    thinkingEl = null;
+    rawMarkdown = '';
+    todoPanel = null;
+    teamPanel = null;
+    teamWorkers = {};
+    lastDoneContent = '';
+    setStatus('idle', '就绪');
+    scrollDown();
+  }
+
+  window.switchToSession = function(id) {
+    if (running) { addSystem('⚠ 当前会话正在运行，无法切换'); return; }
+    if (id === activeSessionId) return;
+    switching = true;
+    saveCurrentSessionHtml();
+    activeSessionId = id;
+    resetChat(sessionHtmlCache[id] || '');
+    renderSessionList();
+    connect(id);
+  };
+
+  window.newSession = function() {
+    if (running) { addSystem('⚠ 当前会话正在运行，无法新建'); return; }
+    saveCurrentSessionHtml();
+    fetch('/api/sessions?token=' + encodeURIComponent(token), { method: 'POST' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        sessions.unshift({ id: d.id, title: d.title || '新会话' });
+        renderSessionList();
+        switching = true;
+        activeSessionId = d.id;
+        resetChat('');
+        connect(d.id);
+      })
+      .catch(function() { addSystem('⚠ 新建会话失败'); });
+  };
+
+  window.deleteSession = function(id) {
+    if (running && id === activeSessionId) { addSystem('⚠ 当前会话正在运行，无法删除'); return; }
+    fetch('/api/sessions/' + encodeURIComponent(id) + '?token=' + encodeURIComponent(token), { method: 'DELETE' })
+      .then(function(r) { return r.json(); })
+      .then(function() {
+        delete sessionHtmlCache[id];
+        var idx = -1;
+        for (var i = 0; i < sessions.length; i++) {
+          if (sessions[i].id === id) { idx = i; break; }
+        }
+        if (idx >= 0) sessions.splice(idx, 1);
+        if (id === activeSessionId) {
+          activeSessionId = null;
+          if (sessions.length) {
+            switchToSession(sessions[0].id);
+          } else {
+            newSession();
+          }
+        } else {
+          renderSessionList();
+        }
+      })
+      .catch(function() { addSystem('⚠ 删除会话失败'); });
+  };
+
+  function initSessions() {
+    fetch('/api/sessions?token=' + encodeURIComponent(token))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        sessions = (data.sessions || []).map(function(s) { return { id: s.id, title: s.title }; });
+        if (!sessions.length) {
+          return fetch('/api/sessions?token=' + encodeURIComponent(token), { method: 'POST' })
+            .then(function(r) { return r.json(); })
+            .then(function(d) { sessions = [{ id: d.id, title: d.title || '新会话' }]; });
+        }
+      })
+      .then(function() {
+        renderSessionList();
+        activeSessionId = sessions[0].id;
+        connect(activeSessionId);
+      })
+      .catch(function() { /* 忽略初始化错误 */ });
+  }
+
+  function connect(sessionId) {
     if (ws) { try { ws.close(); } catch(e) {} }
 
-    var url = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws?token=' + encodeURIComponent(token);
+    var sid = sessionId || '';
+    var url = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws?token=' + encodeURIComponent(token) + '&session_id=' + encodeURIComponent(sid);
     ws = new WebSocket(url);
 
     ws.onopen = function() {
       connected = true;
+      switching = false;
       $('msg-input').focus();
     };
 
@@ -1127,6 +1312,7 @@ body {
         window.location.href = '/';
         return;
       }
+      if (switching) return;
       addSystem('✗ 连接已断开');
       setStatus('idle', '已断开');
     };
@@ -1186,8 +1372,9 @@ body {
         }
         break;
       case 'done':
+        running = false;
         lastDoneContent = data.content || '';
-        setStatus('compressing', '\u6574\u7406\u8bb0\u5fc6...');
+        setStatus('compressing', '整理记忆...');
         if (currentMsgEl) {
           currentMsgEl.classList.remove('streaming');
           var c = currentMsgEl.querySelector('.content');
@@ -1200,6 +1387,7 @@ body {
         break;
       case 'status':
         if (data.phase && data.text) setStatus(data.phase, data.text);
+        if (data.phase === 'idle') running = false;
         break;
       case 'error':
         addSystem('&#9888; ' + (data.content || 'Unknown error'));
@@ -1222,14 +1410,27 @@ body {
         addSystem(data.content || '');
         break;
       case 'interrupted':
+        running = false;
         addSystem('&#9208; 已中断');
         if (currentMsgEl) { currentMsgEl.classList.remove('streaming'); currentMsgEl = null; }
         setStatus('idle', '就绪');
+        break;
+      case 'session_ready':
+        if (!activeSessionId) {
+          activeSessionId = data.session_id;
+        }
+        if (data.title && data.title !== '新会话') {
+          updateSessionTitle(data.session_id, data.title);
+        }
+        break;
+      case 'session_title':
+        updateSessionTitle(data.session_id, data.title);
         break;
       case 'approval_request':
         showApproval(data);
         break;
       case 'cleared':
+        if (activeSessionId) sessionHtmlCache[activeSessionId] = '';
         chatEl.innerHTML = '';
         todoPanel = null;
         teamPanel = null;
@@ -1283,6 +1484,7 @@ body {
     currentMsgEl = null;
     thinkingEl = null;
     rawMarkdown = '';
+    running = true;
     ws.send(JSON.stringify({ type: 'chat', content: text }));
     input.value = '';
     input.style.height = 'auto';
@@ -1342,7 +1544,7 @@ body {
   $('ap-reject').onclick = function() { respondApproval(false, false); };
   $('ap-abort').onclick = function() { respondApproval(false, true); };
 
-  connect();
+  initSessions();
 })();
 </script>
 </body>
