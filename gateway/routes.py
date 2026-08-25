@@ -27,6 +27,7 @@ from .auth import (
 from .ws_console import WebSocketConsole
 from config.system_prompt import _discover_skills
 from plugins.loader import PluginLoader
+from tools.approval import ApprovalBridge, set_web_bridge
 
 # 应用初始化
 
@@ -34,6 +35,10 @@ app = FastAPI(title="Jify")
 
 static_dir = Path(__file__).parent.parent / "gateway_web"
 static_dir.mkdir(exist_ok=True)
+
+# Web 审批桥（gateway 单人模式，进程级全局单例）：工具审批改走浏览器弹窗，而非进程 stdin
+_approval_bridge = ApprovalBridge()
+set_web_bridge(_approval_bridge)
 
 # 插件加载（启动时一次性加载，注册到全局 registry）
 try:
@@ -311,6 +316,11 @@ async def websocket_endpoint(ws: WebSocket):
 
     async def _drain_loop():
         while not _drain_stop.is_set():
+            # 轮询 Web 审批桥：有请求则推送给前端弹窗
+            req = _approval_bridge.poll()
+            while req is not None:
+                await ws.send_json({"type": "approval_request", **req})
+                req = _approval_bridge.poll()
             await console.drain_outgoing()
             await asyncio.sleep(0.05)
 
@@ -357,6 +367,12 @@ async def websocket_endpoint(ws: WebSocket):
                         run_task = None
 
                 run_task = asyncio.create_task(_run())
+
+            elif msg_type == "approval_response":
+                aid = data.get("id", "")
+                approved = bool(data.get("approved", False))
+                break_loop = bool(data.get("break", False))
+                _approval_bridge.respond(aid, approved, break_loop)
 
             elif msg_type == "interrupt":
                 agent.interrupt()

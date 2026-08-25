@@ -543,6 +543,87 @@ body {
   cursor: not-allowed; box-shadow: none; border-color: #d4c5a9;
   transform: none;
 }
+
+/* \u2500\u2500 Approval Modal \u2500\u2500 */
+#approval-overlay {
+  position: fixed; inset: 0;
+  background: rgba(61, 57, 41, .45);
+  display: none; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+#approval-overlay.visible { display: flex; }
+#approval-modal {
+  background: #fff;
+  border: 1px solid #e8ddcc;
+  border-radius: 16px;
+  width: min(640px, 92vw);
+  max-height: 86vh;
+  display: flex; flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0,0,0,.22);
+  overflow: hidden;
+}
+#approval-modal .ap-head {
+  padding: 16px 20px;
+  background: linear-gradient(135deg, #b45309, #c45d1d);
+  color: #fff;
+  display: flex; align-items: center; gap: 10px;
+}
+#approval-modal .ap-head .ap-icon { font-size: 20px; }
+#approval-modal .ap-head .ap-title { font-weight: 700; font-size: 15px; }
+#approval-modal .ap-head .ap-tool {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 13px; background: rgba(255,255,255,.16);
+  padding: 2px 10px; border-radius: 6px; margin-left: auto;
+}
+#approval-modal .ap-body {
+  padding: 16px 20px; overflow-y: auto; flex: 1;
+}
+#approval-modal .ap-label {
+  font-size: 11px; font-weight: 700; color: #b45309;
+  margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .4px;
+}
+#approval-modal .ap-label:first-child { margin-top: 0; }
+#approval-modal .ap-args {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 12px; color: #4a4235; line-height: 1.6;
+  background: #faf5ed; border: 1px solid #e8ddcc;
+  border-radius: 8px; padding: 10px 12px;
+  white-space: pre-wrap; word-break: break-all;
+  max-height: 180px; overflow-y: auto;
+}
+#approval-modal .ap-preview {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px; line-height: 1.5; color: #4a4235;
+  background: #faf5ed; border: 1px solid #e8ddcc;
+  border-radius: 8px; padding: 10px 12px;
+  white-space: pre-wrap; word-break: break-all;
+  max-height: 260px; overflow-y: auto;
+}
+#approval-modal .ap-preview.empty { color: #a0907a; }
+#approval-modal .ap-foot {
+  padding: 14px 20px;
+  border-top: 1px solid #e8ddcc;
+  display: flex; gap: 10px; justify-content: flex-end;
+  background: #fef9f0;
+}
+#approval-modal .ap-btn {
+  padding: 9px 20px; border-radius: 10px;
+  cursor: pointer; font-size: 13px; font-weight: 600;
+  border: none; transition: all .15s;
+}
+#approval-modal .ap-btn.approve {
+  background: linear-gradient(135deg, #16a34a, #15803d); color: #fff;
+  box-shadow: 0 2px 8px rgba(22,163,74,.25);
+}
+#approval-modal .ap-btn.approve:hover { transform: translateY(-1px); }
+#approval-modal .ap-btn.reject {
+  background: #fff; color: #dc2626; border: 1px solid #fca5a5;
+}
+#approval-modal .ap-btn.reject:hover { background: #fef2f2; }
+#approval-modal .ap-btn.abort {
+  background: #fff; color: #92400e; border: 1px solid #d4c5a9;
+}
+#approval-modal .ap-btn.abort:hover { background: #fef0e0; }
 </style>
 </head>
 <body>
@@ -597,6 +678,26 @@ body {
     <div style="margin-top:16px;">
       <button class="config-save-btn" id="config-save-btn" onclick="saveConfig()">保存配置</button>
       <span class="config-save-msg" id="config-save-msg"></span>
+    </div>
+  </div>
+</div>
+<div id="approval-overlay">
+  <div id="approval-modal">
+    <div class="ap-head">
+      <span class="ap-icon">&#128274;</span>
+      <span class="ap-title">&#24037;&#20855;&#23457;&#25209;</span>
+      <span class="ap-tool" id="ap-tool-name">exec</span>
+    </div>
+    <div class="ap-body">
+      <div class="ap-label">&#21442;&#25968;</div>
+      <div class="ap-args" id="ap-args"></div>
+      <div class="ap-label">&#39044;&#35272; (diff)</div>
+      <div class="ap-preview empty" id="ap-preview"></div>
+    </div>
+    <div class="ap-foot">
+      <button class="ap-btn abort" id="ap-abort">&#20013;&#26029;&#24490;&#29615;</button>
+      <button class="ap-btn reject" id="ap-reject">&#25298;&#32477;</button>
+      <button class="ap-btn approve" id="ap-approve">&#25209;&#20934;</button>
     </div>
   </div>
 </div>
@@ -1125,6 +1226,9 @@ body {
         if (currentMsgEl) { currentMsgEl.classList.remove('streaming'); currentMsgEl = null; }
         setStatus('idle', '就绪');
         break;
+      case 'approval_request':
+        showApproval(data);
+        break;
       case 'cleared':
         chatEl.innerHTML = '';
         todoPanel = null;
@@ -1203,6 +1307,40 @@ body {
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 140) + 'px';
   };
+
+  // \u2500\u2500 \u5ba1\u6279\u5f39\u7a97 \u2500\u2500
+  var currentApprovalId = null;
+
+  function showApproval(req) {
+    currentApprovalId = req.id;
+    $('ap-tool-name').textContent = req.tool_name || '';
+    $('ap-args').textContent = prettyJSON(req.args || {});
+    var prevEl = $('ap-preview');
+    var pv = req.preview || '';
+    if (pv) {
+      prevEl.textContent = pv;
+      prevEl.classList.remove('empty');
+    } else {
+      prevEl.textContent = '(\u65e0\u9884\u89c8)';
+      prevEl.classList.add('empty');
+    }
+    $('approval-overlay').classList.add('visible');
+  }
+
+  function hideApproval() {
+    $('approval-overlay').classList.remove('visible');
+    currentApprovalId = null;
+  }
+
+  function respondApproval(approved, breakLoop) {
+    if (!currentApprovalId || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'approval_response', id: currentApprovalId, approved: approved, break: breakLoop }));
+    hideApproval();
+  }
+
+  $('ap-approve').onclick = function() { respondApproval(true, false); };
+  $('ap-reject').onclick = function() { respondApproval(false, false); };
+  $('ap-abort').onclick = function() { respondApproval(false, true); };
 
   connect();
 })();

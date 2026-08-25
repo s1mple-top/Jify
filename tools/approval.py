@@ -17,10 +17,11 @@ import select
 import shutil
 import sys
 import time
+import uuid
 from concurrent.futures import Future
 import termios
 import threading
-from typing import Optional
+from typing import Dict, Optional
 
 from rich.panel import Panel
 from rich.text import Text
@@ -28,6 +29,7 @@ from rich.text import Text
 from output_engine import OutputEngine, JifyTheme
 
 _engine: Optional[OutputEngine] = None
+_web_bridge = None  # Web 审批桥（gateway 启动时设置，设置后审批改走浏览器弹窗）
 break_requested = threading.Event()
 _approval_active = False
 _approval_queue: queue.Queue = queue.Queue()
@@ -38,6 +40,74 @@ termios_lock = threading.Lock()  # 保护所有 tcgetattr/tcsetattr 操作，防
 def set_approval_engine(engine: OutputEngine) -> None:
     global _engine
     _engine = engine
+
+
+def set_web_bridge(bridge) -> None:
+    """设置 Web 审批桥（gateway 启动时调用）。设置后审批请求改走浏览器弹窗，而非进程 stdin。"""
+    global _web_bridge
+    _web_bridge = bridge
+
+
+class ApprovalBridge:
+    """Web 审批桥（线程安全单例）。
+
+    gateway 启动时创建并 set_web_bridge(this)，此后 request_approval 不再操作进程 stdin，
+    而是通过本桥：后台线程 request() 阻塞等待，asyncio drain_loop 轮询 poll() 取请求推给
+    前端，前端点按钮回传后 respond() 回填 Future 解除阻塞。
+
+    语义对齐 CLI 终端审批：
+      - 批准  → f.set_result(True)
+      - 拒绝  → f.set_result(False)
+      - 中断  → f.set_exception(ApprovalBreak)（等价 CLI 的 b）
+      - 超时  → 抛 ApprovalBreak（等价 CLI 的 select 超时 break）
+    """
+
+    def __init__(self):
+        self._pending: Dict[str, tuple] = {}  # aid -> (Future, tool_name)
+        self._lock = threading.Lock()
+        self._queue: queue.Queue = queue.Queue()  # 待推送的审批请求
+
+    def request(self, tool_name: str, args: dict, preview: Optional[str],
+                timeout: float = 120.0) -> bool:
+        """登记审批请求并阻塞等待前端回传。返回 True/False，或抛 ApprovalBreak。"""
+        aid = uuid.uuid4().hex
+        f: Future = Future()
+        with self._lock:
+            self._pending[aid] = (f, tool_name)
+        self._queue.put({
+            "id": aid,
+            "tool_name": tool_name,
+            "args": args,
+            "preview": preview,
+        })
+        try:
+            return f.result(timeout=timeout)
+        except TimeoutError:
+            with self._lock:
+                self._pending.pop(aid, None)
+            raise ApprovalBreak(tool_name)
+
+    def poll(self) -> Optional[dict]:
+        """非阻塞取出一个待推送的审批请求；无则返回 None。"""
+        try:
+            return self._queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def respond(self, aid: str, approved: bool, break_loop: bool) -> bool:
+        """前端回传审批结果，回填 Future。返回是否成功（aid 存在且未完成）。"""
+        with self._lock:
+            item = self._pending.pop(aid, None)
+        if item is None:
+            return False
+        f, tool_name = item
+        if f.done():
+            return False
+        if break_loop:
+            f.set_exception(ApprovalBreak(tool_name))
+        else:
+            f.set_result(approved)
+        return True
 
 
 def is_approval_active() -> bool:
@@ -195,7 +265,15 @@ def _read_approval_choice(tool_name: str, timeout: float = 120.0) -> bool:
                 raise ApprovalBreak(tool_name)
 
             try:
-                raw = os.read(fd, 4096)
+                # 逐字节读取一行（读到 \n 为止），避免一次 os.read 吞掉多行
+                raw = b''
+                while True:
+                    ch = os.read(fd, 1)
+                    if not ch:
+                        break
+                    raw += ch
+                    if ch == b'\n':
+                        break
             except (EOFError, KeyboardInterrupt, OSError):
                 print("\n  [审批] 输入中断，默认拒绝")
                 return False
@@ -204,10 +282,13 @@ def _read_approval_choice(tool_name: str, timeout: float = 120.0) -> bool:
                 print("\n  [审批] 输入中断，默认拒绝")
                 return False
 
-            choice = raw.decode('utf-8', errors='replace')
-            if '\n' in choice:
-                choice = choice.split('\n')[0]
-            choice = choice.strip().lower()
+            # 读取完一行后丢弃剩余输入，避免残留影响后续审批及新轮次输入
+            try:
+                termios.tcflush(fd, termios.TCIFLUSH)
+            except termios.error:
+                pass
+
+            choice = raw.decode('utf-8', errors='replace').strip().lower()
 
             if not choice:
                 print("  [审批] ✓ 已批准\n")
@@ -312,6 +393,10 @@ def request_approval(tool_name: str, args: dict, preview: Optional[str] = None,
     Raises:
         ApprovalBreak → 用户在任意审批中选择中断 或 审批超时
     """
+    # Web 审批桥存在时改走浏览器弹窗（gateway），CLI 仍走终端 consumer
+    if _web_bridge is not None:
+        return _web_bridge.request(tool_name, args, preview, timeout)
+
     # queue串行，防止多个线程同时调用 input() 抢 stdin 导致竞态
     _start_consumer()
     f: Future = Future()
