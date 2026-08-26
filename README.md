@@ -38,8 +38,11 @@ jify -q "介绍下你自己"
 # 启动 Web UI 
 jify gateway --port 9090
 
-# 开启think流式输出，增强使用体感
+# 开启think流式输出，增强使用体验
 jify --think-stream
+
+# 启用 exec 命令白名单安全模式，拦截危险命令
+jify --safe-exec
 ```
 
 首次运行会自动创建 `~/.jify/` 目录并生成默认配置。
