@@ -51,6 +51,7 @@ SLASH_COMMANDS: Dict[str, str] = {
     "help": "显示帮助信息      —  /help",
     "hook": "显示hook信息      —  /hook",
     "skill": "列出所有可用 skill  —  /skill",
+    "learn": "学习当前会话，沉淀为 skill  —  /learn",
     "jify": "分析当前目录下的项目，生成Jify.md      —  /jify",
     "exit": "退出程序          —  /exit",
 }
@@ -526,6 +527,58 @@ def meta(text: str) -> None:
     console.print(Text(text, style=f"italic {JifyTheme.SUBTLE}"))
 
 
+# ── /learn：学习当前会话，沉淀为 skill ──
+_LEARN_PROMPT = """请对下面的会话历史进行学习评估，把可复用的经验沉淀为 skill。
+
+## 会话历史
+{history}
+
+## 学习任务
+
+### 1. 沉淀可复用范式为新 skill
+分析会话中出现的、具备复用价值的操作范式（workflow：批量重构、部署流程、数据处理流水线、项目初始化等）或方法论（methodology：仅限漏洞挖掘/安全审计类的可迁移思路）。
+对每个值得沉淀的范式：
+- 先用 load_skill 检查是否已存在类似 skill，避免重复
+- 调用 skill_create(action="create", name=<英文slug>, content=<完整 SKILL.md>) 创建新 skill
+- content 必须包含 YAML frontmatter（name + description），正文包含「触发场景」「执行步骤」「使用工具」等章节
+- 只沉淀可复用的范式；一次性临时操作、纯问答、单次 bug 修复不要沉淀
+
+### 2. 沉淀漏洞挖掘经验到 security-audit
+如果会话涉及漏洞挖掘/安全审计，且挖掘结论已被确认（confirmed）且合理：
+- 先用 load_skill("security-audit") 读取其 SKILL.md 内容与所在目录路径
+- 用 patch_file 在该 SKILL.md 的合适位置追加「挖掘思路与经验」章节，内容为本次确认有效的挖掘思路、判定方法、经验教训
+- 未确认（not confirmed）、误报、一次性技巧一律不要写入
+
+## 注意
+- 所有落盘动作（skill_create / patch_file / write_file）都会触发审批，请直接调用并等待用户审批
+- 本次任务只做「总结 + 落盘」，禁止重新执行任何本地部署、vuln_verify 测试或其他工具调用，不得发起新的安全测试
+- 如果会话中没有可沉淀的内容，请明确回复用户「本次会话没有可沉淀的内容」，并简要说明原因，不要强行创建"""
+
+
+def _extract_session_history(agent) -> str:
+    """从 agent 会话历史中提取完整对话文本（供 /learn 学习）。
+
+    数据源为 agent._session_messages（跨轮累积的 user/assistant/tool 消息），
+    过滤 system，保留工具调用记录与工具结果，逐条截断避免超长。
+    """
+    with agent._session_messages_lock:
+        messages = list(agent._session_messages)
+
+    lines = []
+    for m in messages:
+        content = m.content or ""
+        tc = getattr(m, "tool_calls", None)
+        if m.role == "assistant" and tc:
+            tc_text = agent._format_tool_calls_text(tc)
+            content = f"{content}\n{tc_text}" if content else tc_text
+        if not content.strip():
+            continue
+        if len(content) > 3000:
+            content = content[:3000] + "\n...[内容过长已截断]"
+        lines.append(f"[{m.role}] {content}")
+    return "\n\n".join(lines)
+
+
 # ── Skill 低使用率检测 ──
 _LOW_USAGE_DAYS = 5
 _LOW_USAGE_THRESHOLD = 7
@@ -958,6 +1011,15 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
                         meta(f"  已加载会话 {arg}")
                     except Exception as e:
                         meta(f"  ⚠ 加载失败: {e}")
+                    divider()
+                    continue
+                elif cmd == "learn":
+                    history = _extract_session_history(agent_cli.agent)
+                    if not history.strip():
+                        meta("  当前会话暂无内容可学习")
+                        divider()
+                        continue
+                    agent_cli.chat(_LEARN_PROMPT.format(history=history))
                     divider()
                     continue
                 elif cmd == "jify":

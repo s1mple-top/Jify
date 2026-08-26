@@ -59,6 +59,7 @@ jify --think-stream
 | `/help` | 显示帮助信息 |
 | `/hook` | 显示已加载的 Hook |
 | `/skill` | 列出可用 Skill |
+| `/learn` | 学习当前对话，沉淀为 Skill |
 | `/jify` | 分析当前工作目录(cwd)下的项目，生成 Jify.md |
 | `/exit` | 退出程序 |
 
