@@ -26,7 +26,7 @@ from typing import Dict, Optional
 from rich.panel import Panel
 from rich.text import Text
 
-from output_engine import OutputEngine, JifyTheme
+from output_engine import OutputEngine, JifyTheme, termios_lock, restore_terminal_sane
 
 _engine: Optional[OutputEngine] = None
 _web_bridge = None  # Web 审批桥（gateway 启动时设置，设置后审批改走浏览器弹窗）
@@ -35,7 +35,6 @@ _approval_active = False
 _approval_queue: queue.Queue = queue.Queue()
 _consumer_started = False
 _consumer_lock = threading.Lock()
-termios_lock = threading.Lock()  # 保护所有 tcgetattr/tcsetattr 操作，防止 ESC 监听器与审批的终端模式切换竞态
 
 def set_approval_engine(engine: OutputEngine) -> None:
     global _engine
@@ -230,8 +229,12 @@ def _read_approval_choice(tool_name: str, timeout: float = 120.0) -> bool:
 
     _approval_active = True
     fd = sys.stdin.fileno()
-    with termios_lock:
-        _saved_tcattr = termios.tcgetattr(fd)
+    _saved_tcattr = None
+    try:
+        with termios_lock:
+            _saved_tcattr = termios.tcgetattr(fd)
+    except (termios.error, OSError, ValueError):
+        _saved_tcattr = None
     try:
         # 先排空所有待输出内容，确保 Panel / prompt 已传输到终端
         sys.stdout.flush()
@@ -303,8 +306,15 @@ def _read_approval_choice(tool_name: str, timeout: float = 120.0) -> bool:
                 raise ApprovalBreak(tool_name)
             print("  无效输入，请按回车批准 / n(拒绝) / b(中断)")
     finally:
-        with termios_lock:
-            termios.tcsetattr(fd, termios.TCSADRAIN, _saved_tcattr)
+        # 先尝试恢复进入审批前的终端状态；若获取失败则退化为 sane 兜底
+        try:
+            if _saved_tcattr is not None:
+                with termios_lock:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, _saved_tcattr)
+        except (termios.error, OSError, ValueError):
+            pass
+        # 无论是否恢复成功，都强制兜底到 canonical + echo，杜绝遗留 raw/-echo
+        restore_terminal_sane()
         _approval_active = False
 
 

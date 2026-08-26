@@ -63,6 +63,8 @@ def exec_tool(command: str, workdir: Optional[str] = None) -> str:
             capture_output=True,
             text=True,
             timeout=DEFAULT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
 
         stdout = (proc.stdout or "")[:MAX_OUTPUT_BYTES]

@@ -51,6 +51,33 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
 
 
+# 全局终端模式锁：保护所有 tcgetattr/tcsetattr 操作。
+# 审批流程(approval)与 prompt_toolkit、动画线程都可能切换终端模式，
+# 统一用这把锁串行化，防止并发切换导致 termios 状态错乱（输入失效）。
+termios_lock = threading.Lock()
+
+
+def restore_terminal_sane() -> None:
+    """把 stdin 恢复到规范的 canonical + echo 状态，作为 prompt_toolkit 进入前的兜底。
+
+    exec 子进程或审批流程若遗留 raw / -echo 等异常终端状态，会导致下一次
+    read_input() 无法回显或无法输入；此函数在每次进入输入前强制纠正。
+    非 tty 环境（如管道、重定向）直接跳过，避免无谓报错。
+    """
+    import sys
+    try:
+        fd = sys.stdin.fileno()
+        if not sys.stdin.isatty():
+            return
+        with termios_lock:
+            attr = termios.tcgetattr(fd)
+            attr[0] |= termios.ICRNL                    # iflag: CR -> NL
+            attr[3] |= termios.ECHO | termios.ICANON    # lflag: 规范模式 + 回显
+            termios.tcsetattr(fd, termios.TCSADRAIN, attr)
+    except (termios.error, OSError, ValueError):
+        pass
+
+
 class JifyTheme:
     ACCENT = "#d4a373"
     SUBTLE = "#585b70"
@@ -428,15 +455,21 @@ class OutputEngine:
                 self._live_active = False
 
     def restart_live(self) -> None:
-        self._live = Live(
-            self.status_line(self._phrase, 0, 0, 0),
-            console=self._console,
-            refresh_per_second=60,
-            transient=True,
-            vertical_overflow="visible",
-        )
-        self._live.start()
-        self._live_active = True
+        # 与 stop_live / 动画线程共用 _anim_lock，串行化对 _live 的替换，
+        # 防止审批恢复动画与中断清理并发时出现两个 Live 并存导致终端状态错乱。
+        with self._anim_lock:
+            if self._live and self._live_active:
+                self._live.update("")
+                self._live.stop()
+            self._live = Live(
+                self.status_line(self._phrase, 0, 0, 0),
+                console=self._console,
+                refresh_per_second=60,
+                transient=True,
+                vertical_overflow="visible",
+            )
+            self._live.start()
+            self._live_active = True
         self._start_animation()
 
     def finalize(self) -> None:
@@ -449,6 +482,8 @@ class OutputEngine:
             termios.tcdrain(sys.stdout.fileno())
         except termios.error:
             pass
+        # 中断/结束统一恢复终端到 sane 状态，防止 exec 子进程或审批遗留 raw/-echo
+        restore_terminal_sane()
         # _input_active 由 main_loop 唯一控制，finalize 不再越权重置
         self._stream_buffer = ""
         self._session_start_time = 0.0
@@ -589,6 +624,9 @@ class OutputEngine:
         self._input_active.set() if active else self._input_active.clear()
 
     def prepare_for_input(self) -> None:
+        # prompt_toolkit 进入前先恢复终端到 sane 状态，兜底修复上次交互遗留的
+        # raw / -echo 等异常模式，确保本次输入可正常回显与读取。
+        restore_terminal_sane()
         with self._anim_lock:
             import sys
             sys.stdout.write("\033[?25h")
