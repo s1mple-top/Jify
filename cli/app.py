@@ -15,10 +15,10 @@ import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import Completer, WordCompleter
+from prompt_toolkit.completion import Completer, WordCompleter, Completion
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.key_binding import KeyBindings
@@ -78,8 +78,36 @@ class SlashCompleter(Completer):
         self._wc = WordCompleter(self._words, sentence=True)
 
     def get_completions(self, document, complete_event):
-        if document.text.startswith("/"):
+        text = document.text
+        # /model <name> 子命令补全：输入空格后列出可用模型名，直接 Tab 选择
+        if text.startswith("/model"):
+            rest = text[len("/model"):]
+            if rest.startswith(" "):
+                prefix = rest[1:].lstrip()
+                for name in _get_model_names():
+                    if name.startswith(prefix):
+                        yield Completion(name, start_position=-len(prefix))
+                return
+        if text.startswith("/"):
             yield from self._wc.get_completions(document, complete_event)
+
+
+# 动态提供可用模型名（由 main_loop 在加载配置后注入），供 /model 补全使用
+_model_names_provider: Optional[Callable[[], List[str]]] = None
+
+
+def _set_model_names_provider(fn: Optional[Callable[[], List[str]]]) -> None:
+    global _model_names_provider
+    _model_names_provider = fn
+
+
+def _get_model_names() -> List[str]:
+    if _model_names_provider is None:
+        return []
+    try:
+        return list(_model_names_provider())
+    except Exception:
+        return []
 
 
 # 粘贴遮蔽全局缓冲区
@@ -723,6 +751,9 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
     # 初始化 Agent
     agent_cli = JifyCLI(think_stream, safe_exec)
     agent_cli.start_mcp_async()
+
+    # 注入可用模型名，供 /model 命令 Tab 补全
+    _set_model_names_provider(lambda: agent_cli.config.model_names)
 
     # 同步 skill 使用记录（启动时确保 usage.json 覆盖所有已安装 skill）
     _sync_usage_file()
