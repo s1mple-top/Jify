@@ -8,7 +8,7 @@ from typing import Optional
 from tools.registry import register_tool
 from tools.builtin.allowlist import check_allowlist, is_file_modifying
 
-DEFAULT_TIMEOUT = 30
+DEFAULT_TIMEOUT = 15
 MAX_OUTPUT_BYTES = 102400  # 100KB
 
 

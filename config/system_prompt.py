@@ -170,8 +170,13 @@ def _discover_skills() -> list[dict[str, str]]:
                 skills.append({name: description})
 
     # 3. 兼容 OpenClaw 的 skill path
-    openclaw_skills_dir = Path(os.path.expanduser("~/.openclaw/workspace/skills"))
-    if openclaw_skills_dir.exists() and openclaw_skills_dir.is_dir():
+    openclaw_skills_dirs = [
+        Path(os.path.expanduser("~/.openclaw/workspace/skills")),
+        Path(os.path.expanduser("~/.openclaw/skills")),
+    ]
+    for openclaw_skills_dir in openclaw_skills_dirs:
+        if not (openclaw_skills_dir.exists() and openclaw_skills_dir.is_dir()):
+            continue
         for skill_path in openclaw_skills_dir.iterdir():
             if not skill_path.is_dir():
                 continue

@@ -74,8 +74,8 @@ class SelfEvolutionEngine:
         # 对话累积缓冲（结构化存储，供经验提取和用户画像使用）
         self._conversation_buffer: List[Dict[str, Any]] = []
         self._BUFFER_MAX_LEN: int = 30         # 缓冲区最大轮次
-        self._EXPERIENCE_CONTEXT_TURNS: int = 5  # 经验提取触发时取最近 N 轮
-        self._PROFILE_CONTEXT_TURNS: int = 5     # 用户画像提取触发时取最近 N 轮
+        self._EXPERIENCE_CONTEXT_TURNS: int = 10  # 经验提取触发时取最近 N 轮
+        self._PROFILE_CONTEXT_TURNS: int = 8     # 用户画像提取触发时取最近 N 轮
 
         # 信号打分触发（替代纯轮次触发）
         self._last_experience_turn: int = 0  # 上次触发经验提取的轮次

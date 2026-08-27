@@ -61,6 +61,7 @@ class AgentConfig:
     tool_delay: float = 0.0
     max_workers: int = 8
     tool_timeout: float = 120.0  # 单次工具调用超时（秒）
+    approval_tool_timeout: float = 180.0  # 审批类工具外层超时（秒），须大于审批等待 120s
     extra_body: dict = field(default_factory=dict)  # 附加到 API 请求体的参数，按 provider 自行配置
     plugins_dir: str = "~/.jify/plugins" # 目录
     SelfEvolutionModel: str= ""
@@ -100,15 +101,36 @@ class AgentConfig:
                     extra_body=entry.get("extra_body", {}),
                 ))
 
+        # 只解析 models 列表：有则取第一个，否则回退到默认值。
+        if models:
+            first = models[0]
+            model = first.model
+            provider = first.provider
+            base_url = first.base_url
+            api_key = first.api_key
+        else:
+            model = defaults.model
+            provider = defaults.provider
+            base_url = defaults.base_url
+            api_key = defaults.api_key
+            models.append(ModelConfig(
+                name=model,
+                provider=provider,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+            ))
+
         return cls(
-            model=raw.get("model", defaults.model),
-            provider=raw.get("provider", defaults.provider),
-            base_url=raw.get("base_url", defaults.base_url),
-            api_key=raw.get("api_key", defaults.api_key),
+            model=model,
+            provider=provider,
+            base_url=base_url,
+            api_key=api_key,
             max_iterations=raw.get("max_iterations", defaults.max_iterations),
             tool_delay=raw.get("tool_delay", defaults.tool_delay),
             max_workers=raw.get("max_workers", defaults.max_workers),
             tool_timeout=raw.get("tool_timeout", defaults.tool_timeout),
+            approval_tool_timeout=raw.get("approval_tool_timeout", defaults.approval_tool_timeout),
             extra_body=raw.get("extra_body", defaults.extra_body),
             plugins_dir=raw.get("plugins_dir", defaults.plugins_dir),
             SelfEvolutionModel=raw.get("SelfEvolutionModel", defaults.SelfEvolutionModel),
@@ -161,6 +183,22 @@ def _get_provider_extra_body(config: "AgentConfig") -> dict:
 
 
 # Agent Loop
+def _resolve_tool_timeout(td, config: "AgentConfig") -> float:
+    """
+    解析单次工具调用的外层超时（秒）。
+
+    优先级：工具显式注册 timeout > config.tool_timeout，
+    其中审批类工具（requires_approval=True）最低取 config.approval_tool_timeout
+    （须 > 审批等待 120s，否则用户批准了、文件也改了，但外层已报假超时）。
+    """
+    if td and td.timeout is not None:
+        return td.timeout
+    timeout = config.tool_timeout
+    if td and td.requires_approval:
+        timeout = max(timeout, config.approval_tool_timeout)
+    return timeout
+
+
 class AgentLoop:
     """
     Agent 循环核心类
@@ -654,11 +692,10 @@ class AgentLoop:
 
         workers = min(len(tool_calls), self.config.max_workers, _MAX_WORKERS)
 
-        timeout = self.config.tool_timeout
-        for tc in tool_calls:
-            td = registry.get(tc.name)
-            if td and td.timeout is not None:
-                timeout = max(timeout, td.timeout)
+        timeout = max(
+            _resolve_tool_timeout(registry.get(tc.name), self.config)
+            for tc in tool_calls
+        )
         deadline = time.time() + timeout
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -700,7 +737,7 @@ class AgentLoop:
                 break
 
             td = registry.get(tc.name)
-            timeout = td.timeout if (td and td.timeout is not None) else self.config.tool_timeout
+            timeout = _resolve_tool_timeout(td, self.config)
 
             start = time.time()
             try:

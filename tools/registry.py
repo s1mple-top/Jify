@@ -157,9 +157,10 @@ registry = ToolRegistry()
 
 def register_tool(name: str, description: str = "", parameters: Optional[Dict] = None,
                   parallel_safe: bool = False, requires_approval: bool = False,
-                  preview_handler: Optional[Callable] = None):
-    """装饰器：注册工具"""
-
+                  preview_handler: Optional[Callable] = None,
+                  timeout: Optional[float] = None):
+    """
+装饰器：注册工具"""
     def decorator(func: Callable):
         registry.register(
             name=name,
@@ -169,6 +170,7 @@ def register_tool(name: str, description: str = "", parameters: Optional[Dict] =
             parallel_safe=parallel_safe,
             requires_approval=requires_approval,
             preview_handler=preview_handler,
+            timeout=timeout,
         )
         return func
 

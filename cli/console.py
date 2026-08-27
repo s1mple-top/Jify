@@ -280,6 +280,10 @@ class CLIConsole:
                     self.total_tokens_recv + token_recv
                 )
 
+        except KeyboardInterrupt:
+            # Ctrl+C 中断路径：释放线程池后向上抛出，避免跳过 shutdown 泄漏
+            tool_executor.shutdown(wait=False)
+            raise
         except Exception as e:
             stream_error = e
             error_msg = str(e)

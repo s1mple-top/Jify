@@ -735,6 +735,28 @@ def _show_low_usage_warning() -> None:
     console.print()
 
 
+def _hard_exit() -> None:
+    """
+    退出统一收口：显式清理全部完成后，绕过 atexit 的线程 join 直接终止进程。
+
+    Python 线程无法强杀。中断遗留的工具线程/流读取线程在正常退出路径会被
+    threading._shutdown join 卡死（表现为退出时挂起，需二次 Ctrl+C）。
+    调用前提：会话保存、P2P 关闭、evolution 关闭、MCP 子进程关闭等关键清理
+    已在 finally 里显式执行完毕，此处只补 stdio flush。
+    """
+    try:
+        from tools.mcp.manager import mcp_manager
+        mcp_manager.shutdown()
+    except Exception:
+        pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(0)
+
+
 # 主 REPL
 def read_input(prompt: str = "> ") -> str:
     global _paste_buffers
@@ -769,9 +791,9 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
     if _USAGE_FILE.exists():
         try:
             usage_data = json.loads(_USAGE_FILE.read_text(encoding="utf-8"))
-            for name in sorted(usage_data.keys()):
-                count = usage_data[name].get("load_count", 0)
-                skill_usage_lines.append(f"{name} : {count}")
+            for skill_name in sorted(usage_data.keys()):
+                count = usage_data[skill_name].get("load_count", 0)
+                skill_usage_lines.append(f"{skill_name} : {count}")
         except (json.JSONDecodeError, IOError):
             pass
 
@@ -1107,10 +1129,13 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
         agent_cli.cli_console.stop_p2p_listener()
         JifyCLI.cleanup_p2p()
         agent_cli.evolution.shutdown(wait=False)
+        _hard_exit()
 
 
 def single_turn(user_input: str, think_stream: bool = False, safe_exec: bool = False) -> None:
-    """单轮快速提问模式（python cli.py -q "你好"）"""
+    """
+    单轮快速提问模式（python cli.py -q "你好"）
+    """
     agent_cli = JifyCLI(think_stream, safe_exec)
 
     console.print()
@@ -1122,8 +1147,10 @@ def single_turn(user_input: str, think_stream: bool = False, safe_exec: bool = F
         console.print()
         meta("  [已中断]")
     finally:
+        agent_cli.cli_console.stop_p2p_listener()
         JifyCLI.cleanup_p2p()
         agent_cli.evolution.shutdown(wait=False)
+        _hard_exit()
 
 def main() -> None:
     ensure_jify_home()

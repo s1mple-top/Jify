@@ -7,12 +7,11 @@ JIFY_HOME = Path.home() / ".jify"
 DEFAULT_CONFIG_YAML = """\
 # Jify Agent 配置文件
 #
-# 多模型配置 —— 在 models 列表中声明所有可用模型，每个模型包含完整的
-# provider / model / base_url / api_key。然后通过 /model <name> 切换。
-#
-# 如果 models 为空，则使用顶层 provider/model/base_url/api_key 作为默认配置。
+# 模型配置 —— 在 models 列表中声明所有可用模型，每个模型包含完整的
+# provider / model / base_url / api_key。列表第一个为默认模型，
+# 通过 /model <name> 切换。
 
-# 多模型配置（推荐）
+# 模型配置
 # models:
 #   - name: gpt-4o
 #     provider: openai
@@ -31,12 +30,6 @@ DEFAULT_CONFIG_YAML = """\
 #     model: deepseek-v4-pro
 #     base_url: https://api.deepseek.com/v1
 #     api_key: "sk-xxx"
-
-# 默认模型配置（models 为空时生效）
-# provider: openai
-# model: gpt-4o
-# base_url: https://api.openai.com/v1
-# api_key: "sk-xxx"
 
 # 自进化引擎模型选择，需要配置
 #SelfEvolutionModel: gpt-4o
