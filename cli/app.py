@@ -38,6 +38,7 @@ from agent_p2p import (
 from output_engine import JifyTheme
 from cli.console import CLIConsole
 from .bootstrap import ensure_jify_home
+from version_check import check_update
 
 console = JifyTheme.create_console()
 
@@ -786,6 +787,9 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
     config = agent_cli.config
     W = 49  # content width inside box borders
 
+    # 版本更新检测（同步）
+    latest_version = check_update()
+
     # 读取 skill 使用统计 (逐条列出)
     skill_usage_lines: List[str] = []
     if _USAGE_FILE.exists():
@@ -797,14 +801,18 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
         except (json.JSONDecodeError, IOError):
             pass
 
-    def _box(content="", indent=3) -> Text:
+    def _box(content="", indent=3, style=JifyTheme.ACCENT) -> Text:
         line = f"{' ' * indent}{content}".ljust(W)
-        return Text(f"│{line}│", style=JifyTheme.ACCENT)
+        return Text(f"│{line}│", style=style)
 
     console.print(Text(f"╭{'─' * W}╮", style=JifyTheme.ACCENT))
-    console.print(_box(f"✻ Welcome to {name} Agent!", indent=1))
+    console.print(_box(f"✳ Welcome to {name} Agent!", indent=1))
     console.print(_box())
     console.print(_box("/help for help"))
+    if latest_version:
+        console.print(_box())
+        console.print(_box(f"↗ New version v{latest_version} available!", indent=1, style=JifyTheme.YELLOW))
+        console.print(_box("Run: git pull && pip install -e .", indent=3, style=JifyTheme.YELLOW))
     console.print(_box())
     console.print(_box(f"cwd: {cwd}"))
     console.print(_box())

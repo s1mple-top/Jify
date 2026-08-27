@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jify"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.109.1",
@@ -34,7 +34,8 @@ py-modules = [
     "event_bus", "experience_extractor",
     "jify_tool", "long_term_memory", "model_client",
     "output_engine", "self_evolution", "skill_detector",
-    "skill_verifier", "subagent", "team", "user_profile"
+    "skill_verifier", "subagent", "team", "user_profile",
+    "version_check",
 ]
 
 [tool.setuptools.packages.find]
