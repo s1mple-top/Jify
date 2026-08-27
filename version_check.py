@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import tomllib
 from typing import Optional
@@ -11,7 +12,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 REPO = "s1mple-top/Jify"
-RAW_BASE = f"https://raw.githubusercontent.com/{REPO}"
+API_BASE = f"https://api.github.com/repos/{REPO}"
 HTTP_TIMEOUT = 3.0
 
 
@@ -26,11 +27,15 @@ def get_current_version() -> str:
 
 def fetch_latest_version() -> Optional[str]:
     """读取远程仓库 main 分支 pyproject.toml 里的 version 字段。失败返回 None。"""
-    url = f"{RAW_BASE}/main/pyproject.toml"
+    url = f"{API_BASE}/contents/pyproject.toml"
     try:
         resp = requests.get(url, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
-        data = tomllib.loads(resp.text)
+        content = (resp.json() or {}).get("content")
+        if not content:
+            return None
+        text = base64.b64decode(content).decode("utf-8")
+        data = tomllib.loads(text)
         version = (data.get("project") or {}).get("version")
         return version or None
     except Exception as exc:  # noqa: BLE001

@@ -9,6 +9,8 @@ import os
 import queue
 import random
 import re
+import shutil
+import subprocess
 import textwrap
 import threading
 import sys
@@ -809,10 +811,6 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
     console.print(_box(f"✳ Welcome to {name} Agent!", indent=1))
     console.print(_box())
     console.print(_box("/help for help"))
-    if latest_version:
-        console.print(_box())
-        console.print(_box(f"↗ New version v{latest_version} available!", indent=1, style=JifyTheme.YELLOW))
-        console.print(_box("Run: git pull && pip install -e .", indent=3, style=JifyTheme.YELLOW))
     console.print(_box())
     console.print(_box(f"cwd: {cwd}"))
     console.print(_box())
@@ -841,6 +839,9 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
     console.print(Text(" 2. Run /resume to resume your conversation", style=JifyTheme.SUBTLE))
     console.print(Text(" 3. Jify can evolve on its own. Please experience it as time goes by", style=JifyTheme.SUBTLE))
     console.print(Text(" 4. Run /jify to analyze the project in your current directory and generate a Jify.md file", style=JifyTheme.SUBTLE))
+    if latest_version:
+        console.print()
+        console.print(Text(f"New version v{latest_version} available!", style=JifyTheme.YELLOW))
     console.print()
     divider()
 
@@ -1183,11 +1184,17 @@ def main() -> None:
     gw_parser.add_argument("--host", type=str, default="127.0.0.1",
                            help="监听地址（默认 127.0.0.1）")
 
+    # update 子命令
+    subparsers.add_parser("update", help="拉取远程最新版本并更新依赖环境")
+
     args, _ = parser.parse_known_args()
 
     # 子命令路由
     if args.command == "gateway":
         _run_gateway(args)
+        return
+    if args.command == "update":
+        _run_update()
         return
 
     # 默认 CLI 模式
@@ -1206,6 +1213,31 @@ def _run_gateway(args: argparse.Namespace) -> None:
     print(f"  登录: http://localhost:{args.port}")
     print(f"  聊天: http://localhost:{args.port}/chat\n")
     uvicorn.run(gw_app, host=args.host, port=args.port, log_level="info")
+
+
+def _run_update() -> None:
+    """拉取远程最新版本并更新依赖环境。"""
+    if not _has_uv():
+        print("  jify update 仅支持使用 uv 更新，请先安装 uv 后再试")
+        return
+
+    project_root = Path(__file__).resolve().parent.parent
+    print(f"\n  拉取远程最新版本: {project_root}")
+    if subprocess.run(["git", "pull"], cwd=project_root).returncode != 0:
+        print("  git pull 失败，请检查网络连接或本地未提交的改动")
+        return
+
+    cmd = ["uv", "sync"]
+    print(f"  更新依赖环境: {' '.join(cmd)}")
+    if subprocess.run(cmd, cwd=project_root).returncode != 0:
+        print("  环境更新失败")
+        return
+    print("  更新完成，请重启 jify 以加载新版本")
+
+
+def _has_uv() -> bool:
+    """检测 uv 命令是否可用。"""
+    return shutil.which("uv") is not None
 
 
 if __name__ == "__main__":
