@@ -841,7 +841,7 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
     console.print(Text(" 4. Run /jify to analyze the project in your current directory and generate a Jify.md file", style=JifyTheme.SUBTLE))
     if latest_version:
         console.print()
-        console.print(Text(f"New version v{latest_version} available!", style=JifyTheme.YELLOW))
+        console.print(Text(f"New version v{latest_version} available! Run \"jify update\" to use the newest version", style=JifyTheme.YELLOW))
     console.print()
     divider()
 
