@@ -1220,11 +1220,16 @@ def _run_update() -> None:
     if not _has_uv():
         print("  jify update 仅支持使用 uv 更新，请先安装 uv 后再试")
         return
+    if not _has_git():
+        print("  jify update 需要 git，请先安装 git 后再试")
+        print("  仅通过 git clone 方式下载的项目才可执行 jify update 更新")
+        return
 
     project_root = Path(__file__).resolve().parent.parent
     print(f"\n  拉取远程最新版本: {project_root}")
     if subprocess.run(["git", "pull"], cwd=project_root).returncode != 0:
         print("  git pull 失败，请检查网络连接或本地未提交的改动")
+        print("  仅通过 git clone 方式下载的项目才可执行 jify update 更新")
         return
 
     cmd = ["uv", "sync"]
@@ -1238,6 +1243,11 @@ def _run_update() -> None:
 def _has_uv() -> bool:
     """检测 uv 命令是否可用。"""
     return shutil.which("uv") is not None
+
+
+def _has_git() -> bool:
+    """检测 git 命令是否可用。"""
+    return shutil.which("git") is not None
 
 
 if __name__ == "__main__":
