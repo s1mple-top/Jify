@@ -527,10 +527,32 @@ body {
 }
 
 /* ── Input Area ── */
-#input-area {
-  padding: 14px 20px;
+#input-area-wrap {
   border-top: 1px solid #e8ddcc;
   background: linear-gradient(0deg, #fef9f0, #fdf8f1);
+}
+#model-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 20px 0;
+  font-size: 11px; color: #a0907a;
+}
+#model-bar .model-bar-label { flex-shrink: 0; }
+#model-select {
+  background: #fff;
+  border: 1px solid #d4c5a9;
+  color: #8b7355;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  outline: none;
+  cursor: pointer;
+  max-width: 260px;
+  transition: border-color .15s;
+}
+#model-select:hover, #model-select:focus { border-color: #b45309; }
+#model-bar .model-bar-hint { color: #c4b596; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#input-area {
+  padding: 14px 20px;
   display: flex; gap: 10px; align-items: flex-end;
 }
 #input-area textarea {
@@ -709,10 +731,17 @@ body {
         <p>&#25105;&#33021;&#24110;&#20320;&#20570;&#20160;&#20040;?</p>
       </div>
     </div>
-    <div id="input-area">
-      <textarea id="msg-input" placeholder="&#36755;&#20837;&#28040;&#24687;... (Enter &#21457;&#36865;, Shift+Enter &#25442;&#34892;)" rows="1"></textarea>
-      <button id="stop-btn" title="&#20013;&#26029;&#24403;&#21069;&#20132;&#20114;">&#20572;&#27490;</button>
-      <button id="send-btn">&#21457;&#36865;</button>
+    <div id="input-area-wrap">
+      <div id="model-bar">
+        <span class="model-bar-label">模型</span>
+        <select id="model-select" title="当前会话使用的模型"><option value="">加载中...</option></select>
+        <span class="model-bar-hint" id="model-hint"></span>
+      </div>
+      <div id="input-area">
+        <textarea id="msg-input" placeholder="&#36755;&#20837;&#28040;&#24687;... (Enter &#21457;&#36865;, Shift+Enter &#25442;&#34892;)" rows="1"></textarea>
+        <button id="stop-btn" title="&#20013;&#26029;&#24403;&#21069;&#20132;&#20114;">&#20572;&#27490;</button>
+        <button id="send-btn">&#21457;&#36865;</button>
+      </div>
     </div>
   </div>
   <div id="skills-panel">
@@ -1422,6 +1451,10 @@ body {
         if (data.title && data.title !== '新会话') {
           updateSessionTitle(data.session_id, data.title);
         }
+        renderModelSelect(data.models || [], data.active_model || '');
+        break;
+      case 'model_switched':
+        $('model-hint').textContent = '已切换: ' + (data.model || data.name || '');
         break;
       case 'session_title':
         updateSessionTitle(data.session_id, data.title);
@@ -1444,6 +1477,32 @@ body {
         break;
     }
   }
+
+  // ── 模型选择栏 ──
+
+  function renderModelSelect(models, active) {
+    var sel = $('model-select');
+    if (!models.length) {
+      sel.innerHTML = '<option value="">默认模型</option>';
+      sel.disabled = true;
+      return;
+    }
+    sel.disabled = false;
+    sel.innerHTML = models.map(function(m) {
+      return '<option value="' + esc(m) + '">' + esc(m) + '</option>';
+    }).join('');
+    sel.value = models.indexOf(active) >= 0 ? active : models[0];
+    if (sel.value !== active) {
+      // 后端激活项与回传不一致时主动同步一次
+      ws.send(JSON.stringify({ type: 'switch_model', name: sel.value }));
+    }
+  }
+
+  $('model-select').onchange = function() {
+    if (!connected || !ws || ws.readyState !== WebSocket.OPEN) return;
+    $('model-hint').textContent = '';
+    ws.send(JSON.stringify({ type: 'switch_model', name: this.value }));
+  };
 
   function prettyJSON(s) {
     if (typeof s !== 'string') {

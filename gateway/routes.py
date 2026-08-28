@@ -362,7 +362,14 @@ async def websocket_endpoint(ws: WebSocket):
     agent = session.agent
 
     # 通知前端当前绑定会话（首次连接无 session_id 时由后端新建并回传 id）
-    await ws.send_json({"type": "session_ready", "session_id": session.session_id, "title": session.title or "新会话"})
+    # 同时回传模型列表与当前激活项，供输入框模型选择栏使用
+    await ws.send_json({
+        "type": "session_ready",
+        "session_id": session.session_id,
+        "title": session.title or "新会话",
+        "models": [m.name for m in agent.config.models],
+        "active_model": agent.config.active_model_name or (agent.config.models[0].name if agent.config.models else ""),
+    })
 
     system_prompt = _build_system_prompt()
 
@@ -450,6 +457,17 @@ async def websocket_endpoint(ws: WebSocket):
                 break_loop = bool(data.get("break", False))
                 _approval_bridge.respond(aid, approved, break_loop)
 
+            elif msg_type == "switch_model":
+                # 运行时切换当前会话使用的模型配置（不写盘，仅影响本 AgentLoop 实例）
+                name = data.get("name", "")
+                if run_task and not run_task.done():
+                    await ws.send_json({"type": "error", "content": "任务运行中，无法切换模型"})
+                    continue
+                if agent.config.activate_model(name):
+                    await ws.send_json({"type": "model_switched", "name": name, "model": agent.config.model})
+                else:
+                    await ws.send_json({"type": "error", "content": f"未找到模型配置: {name}"})
+
             elif msg_type == "interrupt":
                 agent.interrupt()
                 await ws.send_json({"type": "interrupted"})
@@ -480,8 +498,8 @@ async def websocket_endpoint(ws: WebSocket):
             pass  # 静默忽略保存失败（ws 可能已断开）
 
 
-# ── 构建 system prompt ──────────────────────────────────────────────────
 
+# 构建 system prompt
 def _build_system_prompt() -> str:
     """统一 system prompt 构建。Gateway 为单人模式，不按 user_id 隔离。"""
     from config.system_prompt import SystemPromptBuilder
@@ -489,8 +507,8 @@ def _build_system_prompt() -> str:
     return builder.build()
 
 
-# ── 启动入口 ────────────────────────────────────────────────────────────
 
+# 启动入口
 if __name__ == "__main__":
     import uvicorn
     import argparse

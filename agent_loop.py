@@ -69,6 +69,7 @@ class AgentConfig:
     enabled_plugins: Optional[List[str]] = None  # None = 全部加载
     context_compress_threshold: int = 1000000  # 总字符数超过此阈值时触发上下文压缩
     models: List[ModelConfig] = field(default_factory=list)  # 多模型配置列表
+    active_model_name: Optional[str] = None  # 当前激活的模型配置名，None 表示 config.yaml 首个默认
 
     @classmethod
     def load_from_yaml(cls, path: str = None) -> "AgentConfig":
@@ -145,15 +146,17 @@ class AgentConfig:
         for m in self.models:
             if m.name == name:
                 return m
-        return None
-
     @property
     def model_names(self) -> List[str]:
-        """返回所有已配置的模型名称"""
+        """
+        返回所有已配置的模型名称
+        """
         return [m.name for m in self.models]
 
     def activate_model(self, name: str) -> bool:
-        """激活指定模型配置 —— 同步 provider / model / base_url / api_key / extra_body"""
+        """
+        激活指定模型配置 —— 同步 provider / model / base_url / api_key / extra_body
+        """
         mc = self.get_model_config(name)
         if not mc:
             return False
@@ -163,6 +166,7 @@ class AgentConfig:
         self.api_key = mc.api_key
         if mc.extra_body:
             self.extra_body = mc.extra_body.copy()
+        self.active_model_name = name
         return True
 
 

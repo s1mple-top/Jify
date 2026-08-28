@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import queue
 import random
@@ -15,11 +14,12 @@ from rich.text import Text
 from agent_p2p import set_p2p_busy
 from event_bus import event_bus
 from output_engine import OutputEngine, JifyTheme
+from stream_consumer import BaseStreamConsumer
 
 console = JifyTheme.create_console()
 
 
-class CLIConsole:
+class CLIConsole(BaseStreamConsumer):
     THINK_PHRASES = OutputEngine.THINK_PHRASES
 
     _MIN_DRAIN_CAP = 50
@@ -35,6 +35,8 @@ class CLIConsole:
         self.total_tokens_recv = 0
         self._stream_count = 0
         self._pending_sent_tokens = 0
+        self._token_recv = 0
+        self._token_sent_target = 0
         self._stop_listener = threading.Event()
         self._listener_thread: Optional[threading.Thread] = None
         self._stream_error: Optional[Exception] = None
@@ -157,255 +159,81 @@ class CLIConsole:
             except queue.Empty:
                 break
 
-    def consume_stream(self, response, interrupt_event=None):
-        import concurrent.futures
-        from jify_tool import registry as jf_registry
+    # ---- BaseStreamConsumer 钩子 ----
 
-        complete_text = ""
-        reasoning_text = ""
-        tool_call_chunks: Dict[int, Dict] = {}
-        finish_reason = ""
-        pre_results: Dict[str, str] = {}
-        pending_futures: Dict[str, concurrent.futures.Future] = {}
-        _fired_indices: set = set()
-        tc_names: Dict[str, str] = {}
-        tc_args: Dict[str, dict] = {}
-        tc_id_to_idx: Dict[str, int] = {}
-        tool_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
-
+    def _reset_stream_state(self) -> None:
         self._output.stream_buffer = ""
         self._output.think_buffer = ""
         self._output.reset_thinking()
         self._output.phrase = random.choice(self.THINK_PHRASES)
-        token_recv = 0
+        self._token_recv = 0
         self._stream_count += 1
-        token_sent_target = self._drain_sent_events()
-
+        self._token_sent_target = self._drain_sent_events()
         self._output.init_anim_state(
             self.total_tokens_sent,
             self.total_tokens_recv,
-            token_sent_target
+            self._token_sent_target
         )
 
-        def _tool_current_index() -> int:
-            return max(tool_call_chunks.keys()) if tool_call_chunks else -1
+    def _stall_timeout(self) -> Optional[float]:
+        return self._STREAM_STALL_TIMEOUT
 
-        last_seen_idx = -1
+    def _on_content(self, text: str) -> None:
+        if self._think_stream and self._output.model_phase == "thinking":
+            self._output.output_thinking(flush=True)
+        self._output.model_phase = "replying"
+        self._token_recv += len(text)
+        self._output.stream_buffer += text
+        self._output.update_anim_target(-1, self.total_tokens_recv + self._token_recv)
 
-        try:
-            _chunk_iter = iter(response)
-        except TypeError:
-            _chunk_iter = response
+    def _on_thinking(self, text: str) -> None:
+        self._output.model_phase = "thinking"
+        self.last_reasoning_content += text
+        self._output.think_buffer += text
+        self._token_recv += len(text)
+        self._output.update_anim_target(-1, self.total_tokens_recv + self._token_recv)
+        if self._think_stream and len(self._output.think_buffer) >= 120:
+            self._output.output_thinking(flush=True)
 
-        stream_error: Optional[Exception] = None
-        _last_chunk_time = time.monotonic()
-        try:
-            for chunk in _chunk_iter:
-                now = time.monotonic()
-                if now - _last_chunk_time > self._STREAM_STALL_TIMEOUT:
-                    raise TimeoutError(
-                        f"LLM 流式响应停滞 {self._STREAM_STALL_TIMEOUT}s 无数据，"
-                        "API 服务端可能已静默断开连接"
-                    )
-                _last_chunk_time = now
+    def _on_tool_token(self, text: str) -> None:
+        self._token_recv += len(text)
 
-                from tools.approval import break_requested # sys 缓存
-                if interrupt_event is not None and interrupt_event.is_set():
-                    break
-                if break_requested.is_set(): # 审批选择 break 传递信号到此直接break掉
-                    break
+    def _post_chunk(self, chunk) -> None:
+        # 状态更新的设计，会出现recv的时候刷新掉send缓冲里的token，视觉上感知send和recv同时在交互，增强交互力度
+        new_sent = self._drain_sent_events()
+        if new_sent > 0:
+            self._token_sent_target += new_sent
+        self._output.update_anim_target(
+            self.total_tokens_sent + self._token_sent_target,
+            self.total_tokens_recv + self._token_recv
+        )
 
-                if chunk.content:
-                    if self._think_stream and self._output.model_phase == "thinking":
-                        self._output.output_thinking(flush=True)
-                    self._output.model_phase = "replying"
-                    complete_text += chunk.content
-                    token_recv += len(chunk.content)
-                    self._output.stream_buffer += chunk.content
-                    self._output.update_anim_target(-1, self.total_tokens_recv + token_recv)
+    def _handle_stream_error(self, e: Exception, interrupt_event=None) -> None:
+        error_msg = str(e)
 
-                if chunk.thinking:
-                    self._output.model_phase = "thinking"
-                    reasoning_text += chunk.thinking
-                    self.last_reasoning_content += chunk.thinking
-                    self._output.think_buffer += chunk.thinking
-                    token_recv += len(chunk.thinking)
-                    self._output.update_anim_target(-1, self.total_tokens_recv + token_recv)
-                    if self._think_stream and len(self._output.think_buffer) >= 120:
-                        self._output.output_thinking(flush=True)
+        # ESC 中断导致的流关闭，不是真实错误，不打印错误消息
+        if interrupt_event is not None and interrupt_event.is_set():
+            self._output.stream_buffer = ""
+        elif isinstance(e, TimeoutError):
+            self._output.queue_output(Text(
+                f"⚠ 流式响应停滞：{self._STREAM_STALL_TIMEOUT}s 未收到数据。\n"
+                "   API 服务端可能已静默断开连接。\n"
+                "   请检查网络状况后重试，或使用 /clear 清除历史。",
+                style=JifyTheme.RED))
+        elif "peer closed" in error_msg or "incomplete chunked" in error_msg:
+            self._output.queue_output(Text(
+                "⚠ 连接中断：LLM 服务端在响应未完成时关闭了连接。\n"
+                "   这通常是因为上下文过长超出模型窗口限制。\n"
+                "   建议使用 /clear 清除对话历史后重试。",
+                style=JifyTheme.RED))
+        else:
+            self._output.queue_output(Text(f"⚠ 流读取异常: {error_msg}", style=JifyTheme.RED))
 
-                if chunk.tool_call_deltas:
-                    for tc in chunk.tool_call_deltas:
-                        idx = tc.index
-                        if idx not in tool_call_chunks:
-                            tool_call_chunks[idx] = {
-                                "id": "",
-                                "function": {"name": "", "arguments": ""},
-                            }
-                        if tc.id:
-                            tool_call_chunks[idx]["id"] = tc.id
-                        if tc.name:
-                            tool_call_chunks[idx]["function"]["name"] = tc.name
-                            token_recv += len(tc.name)
-                        if tc.arguments:
-                            tool_call_chunks[idx]["function"]["arguments"] += tc.arguments
-                            token_recv += len(tc.arguments)
-
-                    current_indices = {tc.index for tc in chunk.tool_call_deltas}
-                    for cidx in list(tool_call_chunks.keys()):
-                        if cidx not in current_indices and cidx not in _fired_indices:
-                            self._fire_tool(cidx, tool_call_chunks, pending_futures,
-                                            pre_results, tool_executor, jf_registry,
-                                            tc_names, tc_args, tc_id_to_idx)
-                            _fired_indices.add(cidx)
-
-                elif last_seen_idx >= 0 and pending_futures:
-                    for cidx in list(tool_call_chunks.keys()):
-                        if cidx not in _fired_indices:
-                            self._fire_tool(cidx, tool_call_chunks, pending_futures,
-                                            pre_results, tool_executor, jf_registry,
-                                            tc_names, tc_args, tc_id_to_idx)
-                            _fired_indices.add(cidx)
-
-                last_seen_idx = _tool_current_index()
-
-                if chunk.finish_reason:
-                    finish_reason = chunk.finish_reason
-                # 状态更新的设计，会出现recv的时候刷新掉send缓冲里的token，视觉效果上会感知send和recv同时在交互，增强交互力度
-                new_sent = self._drain_sent_events()
-                if new_sent > 0:
-                    token_sent_target += new_sent
-                self._output.update_anim_target(
-                    self.total_tokens_sent + token_sent_target,
-                    self.total_tokens_recv + token_recv
-                )
-
-        except KeyboardInterrupt:
-            # Ctrl+C 中断路径：释放线程池后向上抛出，避免跳过 shutdown 泄漏
-            tool_executor.shutdown(wait=False)
-            raise
-        except Exception as e:
-            stream_error = e
-            error_msg = str(e)
-
-            # ESC 中断导致的流关闭，不是真实错误，不打印错误消息
-            if interrupt_event is not None and interrupt_event.is_set():
-                self._output.stream_buffer = ""
-            elif isinstance(e, TimeoutError):
-                self._output.queue_output(Text(
-                    f"⚠ 流式响应停滞：{self._STREAM_STALL_TIMEOUT}s 未收到数据。\\n"
-                    "   API 服务端可能已静默断开连接。\\n"
-                    "   请检查网络状况后重试，或使用 /clear 清除历史。",
-                    style=JifyTheme.RED))
-            elif "peer closed" in error_msg or "incomplete chunked" in error_msg:
-                self._output.queue_output(Text(
-                    "⚠ 连接中断：LLM 服务端在响应未完成时关闭了连接。\\n"
-                    "   这通常是因为上下文过长超出模型窗口限制。\\n"
-                    "   建议使用 /clear 清除对话历史后重试。",
-                    style=JifyTheme.RED))
-            else:
-                self._output.queue_output(Text(f"⚠ 流读取异常: {error_msg}", style=JifyTheme.RED))
-
+    def _post_stream(self) -> None:
         if self._think_stream:
             self._output.output_thinking(flush=True)
 
-        from tools.approval import break_requested
-        if not break_requested.is_set():
-            for cidx in list(tool_call_chunks.keys()):
-                if cidx not in _fired_indices:
-                    self._fire_tool(cidx, tool_call_chunks, pending_futures,
-                                    pre_results, tool_executor, jf_registry,
-                                    tc_names, tc_args, tc_id_to_idx)
-                    _fired_indices.add(cidx)
-
-        for tc_id, future in pending_futures.items():
-            if tc_id in pre_results:
-                continue
-            try:
-                raw = future.result(timeout=120)
-                try:
-                    data = json.loads(raw)
-                    if isinstance(data, dict) and "__sa_stats__" in data:
-                        stats = data["__sa_stats__"]
-                        tool_uses = stats.get("tool_uses", 0)
-                        elapsed = stats.get("elapsed", 0)
-                        sent_est = stats.get("sent_est", 0)
-                        recv_est = stats.get("recv_est", 0)
-                        token_str = ""
-                        if sent_est:
-                            # 初期架构设计的缺陷，暂时使用预估的token计数
-                            token_str += f" · ↑ {OutputEngine.fmt_tokens(sent_est // 2)} tokens"
-                        if recv_est:
-                            token_str += f" · ↓ {OutputEngine.fmt_tokens(recv_est // 2)} tokens"
-                        self._output.queue_output(Text(
-                            f"  ⏻  Done ({tool_uses} tool uses · {OutputEngine.fmt_elapsed(elapsed)}{token_str})",
-                            style=JifyTheme.SUBTLE
-                        ))
-                        self._output.clear_subagent()
-                        _sa_name = tc_names.get(tc_id, "subagent_run")
-                        _sa_args = tc_args.get(tc_id, {})
-                        pre_results[f"{_sa_name}:{json.dumps(_sa_args, sort_keys=True)}"] = data["result"]
-                        continue
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-                _tool_name = tc_names.get(tc_id, "")
-                _tool_args = tc_args.get(tc_id, {})
-                pre_results[f"{_tool_name}:{json.dumps(_tool_args, sort_keys=True)}"] = raw
-            except Exception as e:
-                _err_name = tc_names.get(tc_id, "")
-                _err_args = tc_args.get(tc_id, {})
-                pre_results[f"{_err_name}:{json.dumps(_err_args, sort_keys=True)}"] = json.dumps({"error": str(e)}, ensure_ascii=False)
-
-        # self._output._tool_running = False
-        # self._output._tool_done = True
-        tool_executor.shutdown(wait=False)
-
-        self._stream_error = stream_error
-        if stream_error is not None:
-            self._output.stream_buffer = ""
-
-        elapsed = time.time() - self._output.session_start_time
-        self._output.model_phase = "idle"
-        self._output.update_status(
-            self._output.phrase, elapsed,
-            self.total_tokens_sent + token_sent_target,
-            self.total_tokens_recv + token_recv
-        )
-
-        self.total_tokens_sent += token_sent_target
-        self.total_tokens_recv += token_recv
-
-        return complete_text, tool_call_chunks, finish_reason, pre_results
-
-    def _fire_tool(self, idx, chunks, pending, pre, executor, registry,
-                   tc_names=None, tc_args=None, tc_id_to_idx=None):
-        from tools.approval import break_requested
-        if break_requested.is_set(): # 中断信号
-            return
-
-        tc = chunks[idx]
-        tc_id = tc.get("id") or f"call_{idx}"
-        name = tc.get("function", {}).get("name", "")
-        args_str = tc.get("function", {}).get("arguments", "{}")
-
-        if not name or tc_id in pending:
-            return
-
-        if tc_names is not None:
-            tc_names[tc_id] = name
-
-        if tc_id_to_idx is not None:
-            tc_id_to_idx[tc_id] = idx
-
-        try:
-            args = json.loads(args_str) if args_str else {}
-        except Exception:
-            args = {}
-
-        if tc_args is not None:
-            tc_args[tc_id] = args
-
+    def _prepare_tool_submit(self, tc_id, name, args, args_str, registry):
         if self._output.think_buffer.strip():
             self._output.output_thinking(flush=True)
 
@@ -432,9 +260,7 @@ class CLIConsole:
                 except Exception as e:
                     return json.dumps({"error": str(e)}, ensure_ascii=False)
 
-            pending[tc_id] = executor.submit(_exec_subagent, tc_id, name, args)
-            # self._output._tool_running = True
-            return
+            return _exec_subagent
 
         if name.startswith("team_"):
             team_label = {
@@ -448,15 +274,12 @@ class CLIConsole:
             self._output.queue_output(Text(""))
             self._output.queue_output(Text(f"⚙ {team_label}…", style="bold white"))
 
-            pending[tc_id] = executor.submit(registry.dispatch, name, args)
-            # self._output._tool_running = True
-            return
+            def _exec_team(tid, tname, targs):
+                return registry.dispatch(tname, targs)
 
-        # if name == "read_file":
-        #     pass
+            return _exec_team
 
         if name == "read_file":
-            # pass
             try:
                 tool_args = json.loads(args_str) if args_str else {}
             except Exception:
@@ -472,8 +295,6 @@ class CLIConsole:
             self._output.queue_output(Text(
                 f"  ⎿  Read {limit} lines", style=JifyTheme.SUBTLE
             ))
-
-
         elif args_str:
             name_line, detail_line = OutputEngine.format_tool_call(name, args_str)
             self._output.queue_output(Text(""))
@@ -492,9 +313,63 @@ class CLIConsole:
 
         # 交给后续的_execute_tools执行 同步执行策略
         if name != "patch_file" and name != "write_file":
-            pending[tc_id] = executor.submit(_exec, tc_id, name, args)
-        # pending[tc_id] = executor.submit(_exec, tc_id, name, args)
-        # self._output._tool_running = True 不显示toolcall，因为毫秒级
+            return _exec
+        return None
+
+    def _on_future_result(self, tc_id, future, pre_results, tc_names, tc_args) -> None:
+        try:
+            raw = future.result(timeout=120)
+        except Exception as e:
+            _err_name = tc_names.get(tc_id, "")
+            _err_args = tc_args.get(tc_id, {})
+            pre_results[f"{_err_name}:{json.dumps(_err_args, sort_keys=True)}"] = json.dumps({"error": str(e)}, ensure_ascii=False)
+            return
+
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and "__sa_stats__" in data:
+                stats = data["__sa_stats__"]
+                tool_uses = stats.get("tool_uses", 0)
+                elapsed = stats.get("elapsed", 0)
+                sent_est = stats.get("sent_est", 0)
+                recv_est = stats.get("recv_est", 0)
+                token_str = ""
+                if sent_est:
+                    # 初期架构设计的缺陷，暂时使用预估的token计数
+                    token_str += f" · ↑ {OutputEngine.fmt_tokens(sent_est // 2)} tokens"
+                if recv_est:
+                    token_str += f" · ↓ {OutputEngine.fmt_tokens(recv_est // 2)} tokens"
+                self._output.queue_output(Text(
+                    f"  ⏻  Done ({tool_uses} tool uses · {OutputEngine.fmt_elapsed(elapsed)}{token_str})",
+                    style=JifyTheme.SUBTLE
+                ))
+                self._output.clear_subagent()
+                _sa_name = tc_names.get(tc_id, "subagent_run")
+                _sa_args = tc_args.get(tc_id, {})
+                pre_results[f"{_sa_name}:{json.dumps(_sa_args, sort_keys=True)}"] = data["result"]
+                return
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        _tool_name = tc_names.get(tc_id, "")
+        _tool_args = tc_args.get(tc_id, {})
+        pre_results[f"{_tool_name}:{json.dumps(_tool_args, sort_keys=True)}"] = raw
+
+    def _finalize_stream(self, stream_error: Optional[Exception]) -> None:
+        self._stream_error = stream_error
+        if stream_error is not None:
+            self._output.stream_buffer = ""
+
+        elapsed = time.time() - self._output.session_start_time
+        self._output.model_phase = "idle"
+        self._output.update_status(
+            self._output.phrase, elapsed,
+            self.total_tokens_sent + self._token_sent_target,
+            self.total_tokens_recv + self._token_recv
+        )
+
+        self.total_tokens_sent += self._token_sent_target
+        self.total_tokens_recv += self._token_recv
 
     def flush_stream(self, is_final: bool = False) -> None:
         if self._stream_error is not None:

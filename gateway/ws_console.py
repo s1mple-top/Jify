@@ -1,18 +1,21 @@
-"""WebSocket 流式控制台 —— 接口对齐 CLIConsole，通过队列桥接同步/异步。"""
+"""WebSocket 流式控制台 —— 接口对齐 CLIConsole，通过队列桥接同步/异步。
+
+consume_stream / _fire_tool 骨架继承自 BaseStreamConsumer（stream_consumer.py），
+子类只实现钩子：chunk → ws 消息、工具 fire 通知、future 收尾解包。
+"""
 
 import json as _json
 import queue
-import time
-import concurrent.futures
-from typing import Dict, Optional, Any
+from typing import Optional
 
 from fastapi import WebSocket
-from jify_tool import registry as jf_registry
+from stream_consumer import BaseStreamConsumer
 from event_bus import event_bus
 
 
-class WebSocketConsole:
-    """对齐 CLIConsole 接口，可由 AgentLoop.run() 同步调用。
+class WebSocketConsole(BaseStreamConsumer):
+    """
+    对齐 CLIConsole 接口，可由 AgentLoop.run() 同步调用。
 
     消息通过 _outgoing 队列产出，由 asyncio 侧 drain_outgoing() 异步推送到 WebSocket。
     """
@@ -115,162 +118,41 @@ class WebSocketConsole:
             return {"type": "workflow_step", "data": ev.data}
         return None
 
-    # 同步 consume_stream（接口对齐 CLIConsole）
+    # ---- BaseStreamConsumer 钩子实现 ----
 
-    def consume_stream(self, response, interrupt_event=None):
-        tool_call_chunks: Dict[int, Dict] = {}
-        finish_reason = ""
-        pre_results: Dict[str, Any] = {}
-        pending_futures: Dict[str, concurrent.futures.Future] = {}
-        _fired_indices: set = set()
-        fired_signatures: set = set()
-        tc_names: Dict[str, str] = {}
-        tc_args: Dict[str, dict] = {}
-        tc_id_to_idx: Dict[str, int] = {}
-        tool_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
-        complete_text = ""
-        reasoning_text = ""
-
+    def _reset_stream_state(self) -> None:
         self._send({"type": "thinking_start"})
 
-        try:
-            _chunk_iter = iter(response)
-        except TypeError:
-            _chunk_iter = response
+    def _on_content(self, text: str) -> None:
+        self.total_tokens_recv += len(text)
+        self._send({"type": "text_chunk", "content": text})
 
-        last_seen_idx = -1
+    def _on_thinking(self, text: str) -> None:
+        self.last_reasoning_content += text
+        self._send({"type": "thinking", "content": text})
 
-        try:
-            for chunk in _chunk_iter:
-                if interrupt_event is not None and interrupt_event.is_set():
-                    break
-
-                from tools.approval import break_requested
-                if break_requested.is_set():
-                    break
-
-                if not hasattr(chunk, "tool_call_deltas"):
-                    continue
-
-                if chunk.content:
-                    complete_text += chunk.content
-                    self.total_tokens_recv += len(chunk.content)
-                    self._send({"type": "text_chunk", "content": chunk.content})
-
-                if chunk.thinking:
-                    reasoning_text += chunk.thinking
-                    self.last_reasoning_content += chunk.thinking
-                    self._send({"type": "thinking", "content": chunk.thinking})
-
-                if chunk.tool_call_deltas:
-                    for tc in chunk.tool_call_deltas:
-                        idx = tc.index
-                        if idx not in tool_call_chunks:
-                            tool_call_chunks[idx] = {
-                                "id": "",
-                                "function": {"name": "", "arguments": ""},
-                            }
-                        if tc.id:
-                            tool_call_chunks[idx]["id"] = tc.id
-                        if tc.name:
-                            tool_call_chunks[idx]["function"]["name"] = tc.name
-                        if tc.arguments:
-                            tool_call_chunks[idx]["function"]["arguments"] += tc.arguments
-
-                    current_indices = {tc.index for tc in chunk.tool_call_deltas}
-                    for cidx in list(tool_call_chunks.keys()):
-                        if cidx not in current_indices and cidx not in _fired_indices:
-                            self._fire_tool(cidx, tool_call_chunks, pending_futures,
-                                            pre_results, tool_executor,
-                                            tc_names, tc_args, tc_id_to_idx,
-                                            fired_signatures)
-                            _fired_indices.add(cidx)
-
-                elif last_seen_idx >= 0 and pending_futures:
-                    for cidx in list(tool_call_chunks.keys()):
-                        if cidx not in _fired_indices:
-                            self._fire_tool(cidx, tool_call_chunks, pending_futures,
-                                            pre_results, tool_executor,
-                                            tc_names, tc_args, tc_id_to_idx,
-                                            fired_signatures)
-                            _fired_indices.add(cidx)
-
-                last_seen_idx = max(tool_call_chunks.keys()) if tool_call_chunks else -1
-
-                if chunk.finish_reason:
-                    finish_reason = chunk.finish_reason
-
-        except Exception:
-            pass
-
-        # 收尾：触发剩余未处理的 tool chunk
-        from tools.approval import break_requested
-        if not break_requested.is_set():
-            for cidx in list(tool_call_chunks.keys()):
-                if cidx not in _fired_indices:
-                    self._fire_tool(cidx, tool_call_chunks, pending_futures,
-                                    pre_results, tool_executor,
-                                    tc_names, tc_args, tc_id_to_idx,
-                                    fired_signatures)
-                    _fired_indices.add(cidx)
-
-        # 等待所有预执行完成
-        for tc_id, future in pending_futures.items():
-            if tc_id in pre_results:
-                continue
-            try:
-                tid, raw, err = future.result(timeout=30)
-                if err:
-                    self._send({"type": "tool_error", "tool_id": tid, "error": err})
-                else:
-                    self._send({"type": "tool_result", "tool_id": tid, "result": raw})
-                pre_results[tid] = raw
-            except Exception as e:
-                pre_results[tc_id] = {"error": str(e)}
-
-        tool_executor.shutdown(wait=False)
-
-        return complete_text, tool_call_chunks, finish_reason, pre_results
-
-    # 流式预执行 _fire_tool（对齐 CLIConsole）
-
-    def _fire_tool(self, idx, chunks, pending, pre, executor,
-                   tc_names=None, tc_args=None, tc_id_to_idx=None,
-                   fired_signatures=None):
-        from tools.approval import break_requested
-        if break_requested.is_set():
-            return
-
-        tc = chunks[idx]
-        tc_id = tc.get("id") or f"call_{idx}"
-        name = tc.get("function", {}).get("name", "")
-        args_str = tc.get("function", {}).get("arguments", "{}")
-
-        if not name or tc_id in pending:
-            return
-
-        if tc_names is not None:
-            tc_names[tc_id] = name
-        if tc_id_to_idx is not None:
-            tc_id_to_idx[tc_id] = idx
-
-        try:
-            args = _json.loads(args_str) if args_str else {}
-        except Exception:
-            args = {}
-
-        if tc_args is not None:
-            tc_args[tc_id] = args
-
-        self._send({"type": "tool_start", "tool_name": name})
+    def _prepare_tool_submit(self, tc_id, name, args, args_str, registry):
+        self._send({"type": "tool_start", "tool_name": name, "tool_id": tc_id})
 
         def _exec_tool(tid, tname, targs):
             try:
-                result = jf_registry.dispatch(tname, targs)
+                result = registry.dispatch(tname, targs)
                 return tid, result, None
             except Exception as e:
-                return tid, {"error": str(e)}, str(e)
+                return tid, _json.dumps({"error": str(e)}, ensure_ascii=False), str(e)
 
-        pending[tc_id] = executor.submit(_exec_tool, tc_id, name, args)
-        if fired_signatures is not None:
-            fired_signatures.add(f"{name}:{_json.dumps(args, sort_keys=True)}")
+        return _exec_tool
+
+    def _on_future_result(self, tc_id, future, pre_results, tc_names, tc_args) -> None:
+        try:
+            tid, raw, err = future.result(timeout=30)
+            if err:
+                self._send({"type": "tool_error", "tool_id": tid, "error": err})
+            else:
+                self._send({"type": "tool_result", "tool_id": tid, "result": raw})
+            # 签名 key（name:json(args)），与 agent_loop._execute_tools 的预执行匹配逻辑对齐
+            _name = tc_names.get(tc_id, "")
+            _args = tc_args.get(tc_id, {})
+            pre_results[f"{_name}:{_json.dumps(_args, sort_keys=True)}"] = raw
+        except Exception as e:
+            pre_results[tc_id] = {"error": str(e)}
