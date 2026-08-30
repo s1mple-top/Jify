@@ -14,16 +14,21 @@ import subprocess
 import textwrap
 import threading
 import sys
+import unicodedata
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import Application
 from prompt_toolkit.completion import Completer, WordCompleter, Completion
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Layout, ScrollablePane
+from prompt_toolkit.layout.containers import HSplit, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style as PTStyle
 from rich.markdown import Markdown
 from rich.padding import Padding
@@ -770,8 +775,163 @@ def read_input(prompt: str = "> ") -> str:
         return ""
 
 
+def _disp_width(s: str) -> int:
+    """计算字符串的终端显示宽度（东亚宽字符按 2 列，其余按 1 列）。"""
+    w = 0
+    for ch in s:
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return w
+
+
+def _fit(content: str, width: int) -> str:
+    """按显示宽度将 content 截断到 width，超出部分以 "..." 收尾，保证不顶破边框。"""
+    if _disp_width(content) <= width:
+        return content
+    suffix = "..."
+    target = width - _disp_width(suffix)
+    out = []
+    w = 0
+    for ch in content:
+        cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if w + cw > target:
+            break
+        out.append(ch)
+        w += cw
+    return "".join(out) + suffix
+
+
+def _show_trust_prompt(cwd: str) -> bool:
+    """启动 banner 前的风险提示：上下键选择，回车确认。
+
+    Jify 内部包含 exec 等敏感工具，AI 可能存在幻觉，启动前需用户明确授权。
+
+    Returns:
+        True  — 用户选择 "Yes, proceed"（继续启动 Jify）
+        False — 用户选择 "No, exit" 或按 Esc/Ctrl+C（退出）
+    """
+    options = ["是，继续 (Yes, proceed)", "否，退出 (No, exit)"]
+    selected = 0
+    term_cols, term_lines = shutil.get_terminal_size()
+    # 边框内部宽度：跟随终端宽度动态调整，最少 40 保证可读，最多 78 避免过宽，
+    # 预留 4 列给边框与边距，避免窄终端触发 "Window too small"。
+    W = max(40, min(78, term_cols - 4))
+
+    body_lines = [
+        "  你信任这个文件夹里的文件吗？",
+        "",
+        f"  {cwd}",
+        "",
+        "  Jify 可能会读取此文件夹中的文件。读取不受信任的文件",
+        "  可能导致 Jify 做出意料之外的行为。",
+        "",
+        "  经你授权后，Jify 可能会在此文件夹中执行文件和运行",
+        "  shell 命令。执行不受信任的代码是不安全的。",
+        "",
+        "",
+        "  Do you trust the files in this folder?",
+        "",
+        f"  {cwd}",
+        "",
+        "  Jify may read files in this folder. Reading untrusted files",
+        "  may lead Jify to behave in unexpected ways.",
+        "",
+        "  With your permission, Jify may execute files and run shell",
+        "  commands in this folder. Executing untrusted code is unsafe.",
+        "",
+    ]
+    hint = "  Enter to confirm · Esc to exit"
+
+    kb = KeyBindings()
+
+    @kb.add(Keys.Up)
+    @kb.add("k")
+    def _up(event):
+        nonlocal selected
+        selected = (selected - 1) % len(options)
+
+    @kb.add(Keys.Down)
+    @kb.add("j")
+    def _down(event):
+        nonlocal selected
+        selected = (selected + 1) % len(options)
+
+    @kb.add(Keys.Enter)
+    def _confirm(event):
+        event.app.exit(result=selected)
+
+    @kb.add(Keys.Escape)
+    @kb.add("q")
+    def _cancel(event):
+        event.app.exit(result=1)
+
+    def _row(content: str) -> str:
+        content = _fit(content, W)
+        pad = W - _disp_width(content)
+        return "│" + content + " " * max(pad, 0) + "│"
+
+    def _render():
+        top = "╭" + "─" * W + "╮"
+        bottom = "╰" + "─" * W + "╯"
+        fragments = [("class:border", top + "\n")]
+        for line in body_lines:
+            fragments.append(("", _row(line) + "\n"))
+        for i, opt in enumerate(options):
+            marker = "❯ " if i == selected else "  "
+            style = "class:selected" if i == selected else ""
+            fragments.append((style, _row(f"   {marker}{i + 1}. {opt}") + "\n"))
+        fragments.append(("", _row("") + "\n"))
+        fragments.append(("class:hint", _row(hint) + "\n"))
+        fragments.append(("class:border", bottom + "\n"))
+        return fragments
+
+    n_lines = 1 + len(body_lines) + len(options) + 3  # top + body + options + (blank/hint/bottom)
+    content_window = Window(content=FormattedTextControl(_render), height=n_lines)
+    scrollable = ScrollablePane(content_window, show_scrollbar=False)
+    layout = Layout(HSplit([
+        Window(height=1),
+        scrollable,
+        Window(height=1),
+    ]))
+
+    @kb.add(Keys.PageDown)
+    @kb.add("c-d")
+    def _scroll_down(event):
+        scrollable.vertical_scroll = min(scrollable.vertical_scroll + 3, n_lines)
+        event.app.invalidate()
+
+    @kb.add(Keys.PageUp)
+    @kb.add("c-u")
+    def _scroll_up(event):
+        scrollable.vertical_scroll = max(scrollable.vertical_scroll - 3, 0)
+        event.app.invalidate()
+
+    app = Application(
+        layout=layout,
+        key_bindings=kb,
+        style=PTStyle.from_dict({
+            "selected": "reverse",
+            "border": JifyTheme.ACCENT,
+            "hint": JifyTheme.SUBTLE,
+        }),
+        full_screen=True,
+        mouse_support=True,
+    )
+
+    try:
+        result = app.run()
+    except KeyboardInterrupt:
+        return False
+    return result == 0
+
+
 def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
     console.clear()
+
+    # 启动风险提示：banner 输出前要求用户确认授权
+    if not _show_trust_prompt(os.getcwd()):
+        console.print(Text("  已取消启动，Jify 未运行。", style=JifyTheme.SUBTLE))
+        return
+
 
     # 初始化 Agent
     agent_cli = JifyCLI(think_stream, safe_exec)
@@ -804,7 +964,8 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
             pass
 
     def _box(content="", indent=3, style=JifyTheme.ACCENT) -> Text:
-        line = f"{' ' * indent}{content}".ljust(W)
+        content = _fit(f"{' ' * indent}{content}", W)
+        line = content + " " * (W - _disp_width(content))
         return Text(f"│{line}│", style=style)
 
     console.print(Text(f"╭{'─' * W}╮", style=JifyTheme.ACCENT))

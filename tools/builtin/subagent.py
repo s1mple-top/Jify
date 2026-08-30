@@ -70,8 +70,10 @@ def subagent_run(task: str, max_iterations: int = 20) -> str:
     # 延迟导入避免循环依赖 (agent_loop → jify_tool → tools.builtin → subagent → agent_loop)
     from agent_loop import AgentConfig
     from model_client import get_model_client
+    from tools.registry import get_agent_config
 
-    config = AgentConfig.load_from_yaml()
+    # 优先复用主 Agent 的 config（跟随 /model 切换），否则回退到从磁盘加载
+    config = get_agent_config() or AgentConfig.load_from_yaml()
     model_client = get_model_client(
         provider=config.provider,
         api_key=config.api_key or None,

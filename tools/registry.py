@@ -15,6 +15,26 @@ _subagent_whitelist: 'contextvars.ContextVar[Optional[set]]' = \
     contextvars.ContextVar('subagent_whitelist', default=None)
 
 
+# 主 Agent 运行时 config（contextvars，供 subagent_run 复用主 Agent 的 config，而非重读磁盘）
+_agent_config: 'contextvars.ContextVar[Optional[Any]]' = \
+    contextvars.ContextVar('agent_config', default=None)
+
+
+def set_agent_config(config: Any):
+    """在主 Agent 执行工具期间设置当前 config，供 subagent_run 复用。返回 reset token。"""
+    return _agent_config.set(config)
+
+
+def reset_agent_config(token) -> None:
+    """复位 set_agent_config 设置的 config。"""
+    _agent_config.reset(token)
+
+
+def get_agent_config() -> Optional[Any]:
+    """获取当前主 Agent 的 config；若未设置则返回 None。"""
+    return _agent_config.get()
+
+
 # ToolRegistry
 class ToolRegistry:
     """

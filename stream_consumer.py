@@ -10,6 +10,7 @@ future 等待、返回值组装）抽到基类，CLI / Web 两个子类各自实
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import json
 import time
 from typing import Any, Dict, Optional
@@ -181,7 +182,9 @@ class BaseStreamConsumer:
 
         exec_fn = self._prepare_tool_submit(tc_id, name, args, args_str, registry)
         if exec_fn is not None:
-            pending[tc_id] = executor.submit(exec_fn, tc_id, name, args)
+            # 显式传播当前 context（含主 Agent config），使 worker 线程中的 subagent_run 能复用
+            ctx = contextvars.copy_context()
+            pending[tc_id] = executor.submit(ctx.run, exec_fn, tc_id, name, args)
 
 
     # 钩子（子类实现）

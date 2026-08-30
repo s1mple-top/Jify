@@ -22,6 +22,7 @@ from context_manager import ContextManager
 
 from model_client import get_model_client
 from jify_tool import registry, ToolCall, should_parallel, _MAX_WORKERS
+from tools.registry import set_agent_config, reset_agent_config
 from event_bus import event_bus, UIEvent
 from plugins.hook_manager import hook_manager
 
@@ -432,6 +433,9 @@ class AgentLoop:
         is_interrupted = False
         final_msg = ""
 
+        # 将当前 config 注入 contextvar，供工具执行期间 subagent_run 复用（覆盖流式预执行与兜底执行两条路径）
+        _config_token = set_agent_config(self.config)
+
         # 限制 Loop 轮数
         while self.iteration_count < self.config.max_iterations:
             if self._interrupt_requested:
@@ -517,6 +521,7 @@ class AgentLoop:
                 # 格式化本轮 → 追加到历史 → 重建 messages 只留 system
                 self._append_turn_to_history(_turn_start_idx)
 
+                reset_agent_config(_config_token)
                 elapsed = time.time() - run_start
                 total_tokens = console.total_tokens_sent + console.total_tokens_recv
                 return {
@@ -604,6 +609,7 @@ class AgentLoop:
                 [m for m in self.messages if m.role != "system"]
             )
         self._append_turn_to_history(_turn_start_idx)
+        reset_agent_config(_config_token)
         elapsed = time.time() - run_start
         total_tokens = console.total_tokens_sent + console.total_tokens_recv
         return {
@@ -618,6 +624,14 @@ class AgentLoop:
 
 
     # 工具执行
+    def _dispatch_with_config(self, name: str, args: Dict[str, Any]) -> str:
+        """在 worker 线程中注入当前 config 后执行工具，供 subagent_run 复用主 Agent 的 config。"""
+        token = set_agent_config(self.config)
+        try:
+            return registry.dispatch(name, args)
+        finally:
+            reset_agent_config(token)
+
     def _execute_tools(self, tool_calls: List[Dict[str, Any]],
                        pre_results: Dict[str, str] = None) -> List[ToolCall]:
         """
@@ -679,7 +693,7 @@ class AgentLoop:
 
             start = time.time()
             try:
-                result = registry.dispatch(tc.name, tc.args)
+                result = self._dispatch_with_config(tc.name, tc.args)
             except Exception as e:
                 result = json.dumps({"error": str(e)})
             tc.result = result
@@ -747,7 +761,7 @@ class AgentLoop:
             try:
                 # 方便超时断链
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(registry.dispatch, tc.name, tc.args)
+                    future = executor.submit(self._dispatch_with_config, tc.name, tc.args)
                     result = future.result(timeout=timeout)
             except concurrent.futures.TimeoutError:
                 result = json.dumps({"error": f"Tool timeout after {timeout:.0f}s"})
