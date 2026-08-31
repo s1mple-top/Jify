@@ -464,6 +464,7 @@ async def websocket_endpoint(ws: WebSocket):
                     await ws.send_json({"type": "error", "content": "任务运行中，无法切换模型"})
                     continue
                 if agent.config.activate_model(name):
+                    agent.clear_reasoning_content()
                     await ws.send_json({"type": "model_switched", "name": name, "model": agent.config.model})
                 else:
                     await ws.send_json({"type": "error", "content": f"未找到模型配置: {name}"})

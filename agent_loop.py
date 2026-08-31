@@ -110,11 +110,13 @@ class AgentConfig:
             provider = first.provider
             base_url = first.base_url
             api_key = first.api_key
+            extra_body = first.extra_body
         else:
             model = defaults.model
             provider = defaults.provider
             base_url = defaults.base_url
             api_key = defaults.api_key
+            extra_body = defaults.extra_body
             models.append(ModelConfig(
                 name=model,
                 provider=provider,
@@ -133,7 +135,7 @@ class AgentConfig:
             max_workers=raw.get("max_workers", defaults.max_workers),
             tool_timeout=raw.get("tool_timeout", defaults.tool_timeout),
             approval_tool_timeout=raw.get("approval_tool_timeout", defaults.approval_tool_timeout),
-            extra_body=raw.get("extra_body", defaults.extra_body),
+            extra_body=extra_body,
             plugins_dir=raw.get("plugins_dir", defaults.plugins_dir),
             SelfEvolutionModel=raw.get("SelfEvolutionModel", defaults.SelfEvolutionModel),
             SelfEvolutionTurn=raw.get("SelfEvolutionTurn", defaults.SelfEvolutionTurn),
@@ -165,23 +167,35 @@ class AgentConfig:
         self.provider = mc.provider
         self.base_url = mc.base_url
         self.api_key = mc.api_key
-        if mc.extra_body:
-            self.extra_body = mc.extra_body.copy()
+        self.extra_body = (mc.extra_body or {}).copy()
         self.active_model_name = name
         return True
 
 
 def _get_provider_extra_body(config: "AgentConfig") -> dict:
-    """根据 provider/base_url/model 自动选择 API extra_body 参数。"""
+    """根据 base_url 域名 / model 前缀精确识别供应商，自动选择 API extra_body 参数。"""
     base = (config.base_url or "").lower()
     model = (config.model or "").lower()
     extra = {}
 
-    if "minimaxi" in base or "minimax" in model:
+    if "minimax" in base or model.startswith("minimax"):
         extra["reasoning_split"] = True
         extra["include_usage"] = True
-    if "glm" in model: # GLM think模式默认开启
+    if "bigmodel.cn" in base or model.startswith("glm"):  # GLM think模式默认开启
         extra["thinking"] = {"type":"enabled"}
+    if "deepseek.com" in base or model.startswith("deepseek"):
+        # DeepSeek 思考档位：服务端默认已开启 high。仅在用户显式配置 reasoning_effort 时，
+        # 按 provider 映射为对应格式（anthropic → reasoning/output_config，openai → thinking/reasoning_effort）。
+        effort = (config.extra_body or {}).get("reasoning_effort")
+        if effort:
+            if config.provider in ("anthropic", "claude"):
+                extra["thinking"] = {"type": "disabled" if effort == "none" else "enabled"}
+                if effort != "none":
+                    extra["output_config"] = {"effort": effort}
+            else:
+                extra["thinking"] = {"type": "disabled" if effort == "none" else "enabled"}
+                if effort != "none":
+                    extra["reasoning_effort"] = effort
 
     return extra
 
@@ -262,6 +276,22 @@ class AgentLoop:
         self.ctx = ContextManager(summarizer=self._summarize)
         with self._session_messages_lock:
             self._session_messages.clear()
+
+    def clear_reasoning_content(self) -> None:
+        """切换模型后清空历史消息中的 reasoning_content，避免跨供应商残留污染。
+
+        reasoning_content 是思考模型（DeepSeek/GLM 等）上一轮的思考原文，仅在
+        同供应商的多轮 tool call 循环中续接使用。切换供应商后原样回传可能被
+        严格校验的网关拒绝，故切换时统一清空（文本上下文 content 不受影响，
+        模型切换回来会基于文本重新思考）。
+        """
+        for m in self.messages:
+            if m.reasoning_content:
+                m.reasoning_content = None
+        with self._session_messages_lock:
+            for m in self._session_messages:
+                if m.reasoning_content:
+                    m.reasoning_content = None
 
     # 会话持久化
     def save_conversation(self) -> Optional[str]:

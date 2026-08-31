@@ -26,10 +26,12 @@ DEFAULT_CONFIG_YAML = """\
 #     api_key: "sk-ant-xxx"
 #
 #   - name: deepseek
-#     provider: openai
+#     provider: anthropic
 #     model: deepseek-v4-pro
-#     base_url: https://api.deepseek.com/v1
+#     base_url: https://api.deepseek.com/anthropic
 #     api_key: "sk-xxx"
+#     extra_body:
+#       reasoning_effort: high
 
 # 自进化引擎模型选择，需要配置
 #SelfEvolutionModel: gpt-4o

@@ -1190,6 +1190,7 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
                             meta(f"  ✗ 未配置多模型列表，无法切换")
                             meta(f"  请在 config.yaml 的 models 字段中配置模型")
                     else:
+                        agent_cli.agent.clear_reasoning_content()
                         meta(f"  已切换模型 → {arg}")
                         meta(f"    provider: {agent_cli.config.provider}")
                         meta(f"    base_url: {agent_cli.config.base_url}")

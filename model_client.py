@@ -458,9 +458,16 @@ class AnthropicClient:
         if is_stream:
             create_kwargs["stream"] = True
 
+        # 透传 extra_body（如 DeepSeek 的 reasoning/output_config 等扩展参数）。
+        # 必须通过 SDK 的 extra_body 参数传给请求体，不能展开成顶层 kwarg，
+        # 否则 reasoning_effort 等扩展字段会被当作 create() 的非法关键字参数。
+        extra_body = kwargs.get("extra_body")
+        if not isinstance(extra_body, dict):
+            extra_body = {}
+
         _timeout_seq = [10.0] * 5 + [15.0] * 5
         raw = _retry(
-            lambda timeout: self._client.messages.create(**create_kwargs, timeout=timeout),
+            lambda timeout: self._client.messages.create(**create_kwargs, extra_body=extra_body, timeout=timeout),
             max_attempts=10,
             timeout_seq=_timeout_seq,
         )
