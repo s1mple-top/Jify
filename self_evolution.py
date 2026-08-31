@@ -23,8 +23,6 @@ from dataclasses import dataclass, field
 from typing import Optional, Callable, Dict, Any, List
 from enum import Enum
 
-from skill_verifier import verify_skill_async
-
 
 class TaskPhase(Enum):
     PROFILE = "profile"           # 用户画像提取
@@ -385,16 +383,10 @@ class SelfEvolutionEngine:
         return self._skill_detector.get_pending_approval()
 
     def approve_skill(self, name: str) -> bool:
-        """审批通过一个 skill，落盘 SKILL.md + 旁路验证"""
+        """审批通过一个 skill，落盘 SKILL.md"""
         if self._skill_detector is None:
             return False
         ok = self._skill_detector.approve(name)
-        if ok:
-            # 旁路验证：不阻塞主 loop
-            try:
-                verify_skill_async(name)
-            except Exception:
-                pass
         return ok
 
     def reject_skill(self, name: str) -> bool:

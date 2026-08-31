@@ -78,6 +78,25 @@ license: MIT
 - 按危害程度排序，最严重的放最前面
 - 用表格给出「速览」摘要，再用详细章节展开
 
+### 7. 经验沉淀（审计收尾必须执行）
+把**经过确认可行的思路与经验**结构化沉淀进经验库，供下次审计同类项目复用。调用 `skill_experience_add(skill_name="security-audit", ...)`，逐条添加。
+
+**落盘门槛（必须满足至少一条，否则一律不落盘）：**
+- 漏洞已经 `vuln_verify` 黑盒实测，返回 confirmed 证据（回显 / 时序 / 回连 / 状态码差异）
+- 用户已明确确认该漏洞正确（如「对」「确认」「是的」）
+
+**以下情况一律不落盘：**
+- 仅静态分析线索、未经黑盒验证
+- `vuln_verify` 返回 not confirmed / 误报
+- 用户否定或未表态
+
+字段填法：
+- **confirmed 漏洞** → `vuln_type` 填漏洞类型（sqli/rce/ssrf/...），`source_pattern` 写源码特征根因（如「f-string 直接拼接 SQL，参数来自用户输入」），`payload` 写验证载荷，`evidence` 写验证证据（响应差异/时序/回连），`approach` 写本次挖洞思路/定位方法，`framework_hint` 写框架栈提示
+- **高发攻击面**（未必有具体洞）→ `vuln_type="attack_surface"`，`source_pattern` 写攻击面特征
+- **绕过技巧 / 探测手法** → `vuln_type="bypass_technique"`，`approach` 或 `note` 写具体手法
+
+思路（`approach`）与经验同门槛，一起落盘。去重由工具按 `vuln_type + source_pattern` 自动完成，重复条目不重复写。
+
 ## 工具使用顺序
 
 ```

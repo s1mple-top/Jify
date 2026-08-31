@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from tools.registry import register_tool
+from tools.builtin.skill_experience import render_for_prompt
 from event_bus import UIEvent, event_bus
 
 # 使用量追踪文件
@@ -105,6 +106,11 @@ def load_skill(skill_name: str) -> str:
     try:
         with open(skill_md_path, 'r', encoding='utf-8') as f:
             content = f.read()
+
+        # 附加实战经验库（自增长沉淀，随方法论一起加载）
+        experience_text = render_for_prompt(skill_name)
+        if experience_text:
+            content = content + "\n" + experience_text
 
         # 记录使用量
         _record_usage(skill_name)
