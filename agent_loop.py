@@ -976,7 +976,7 @@ class AgentLoop:
         return any(kw in msg for kw in overflow_keywords)
 
     def interrupt(self) -> None:
-        """请求中断当前循环，优雅的打断"""
+        """请求中断当前循环，优雅打断"""
         self._interrupt_requested = True
         self._interrupt_event.set()  # 触发中断事件
         # 关闭底层 HTTP 流，使阻塞等待首个 chunk 的迭代立即退出
@@ -985,5 +985,13 @@ class AgentLoop:
                 self._active_stream.close()
             except Exception:
                 pass
+        # 传播中断到 Team 模式：中断正在执行的 Worker 任务（不关闭团队结构）
+        try:
+            from team import get_leader
+            leader = get_leader()
+            if leader is not None:
+                leader.interrupt()
+        except Exception:
+            pass
 
 

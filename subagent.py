@@ -39,9 +39,17 @@ class SubagentRunner:
         whitelist_names: Set[str],
         max_iterations: int = 20,
         on_progress: Optional[Callable[[str, Dict], None]] = None,
+        interrupt_event: Optional[threading.Event] = None,
+        history: Optional[List[Dict]] = None,
+        out_history: Optional[List] = None,
     ) -> str:
         """
         执行 subagent 任务并返回最终文本结果。
+
+        Args:
+            history: 传入的历史消息（不含 system），用于跨任务保留上下文记忆。
+            out_history: 可变列表，任务结束后写入本轮完整消息（不含 system），
+                供调用方（如 TeamWorker）保存为下一次的历史。
 
         Returns:
             最终回复文本；若达到最大迭代次数，返回带提示的文本。
@@ -50,11 +58,12 @@ class SubagentRunner:
         _start = time.time()
         tool_uses = 0
         recv_est = 0
+        messages: List[Dict] = []
         try:
-            messages: List[Dict] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": task},
-            ]
+            messages.append({"role": "system", "content": system_prompt})
+            if history:
+                messages.extend(history)
+            messages.append({"role": "user", "content": task})
 
             # 用消息字符串长度估算初始发送 token（与主 agent 的估算方式一致）
             sent_est = len(json.dumps(messages, ensure_ascii=False))
@@ -64,6 +73,16 @@ class SubagentRunner:
             last_content = ""
 
             for _ in range(max_iterations):
+                # 中断检查：主 Agent Ctrl+C 时中断当前 Worker 任务
+                if interrupt_event is not None and interrupt_event.is_set():
+                    _subagent_stats[threading.get_ident()] = {
+                        "tool_uses": tool_uses,
+                        "elapsed": time.time() - _start,
+                        "sent_est": sent_est,
+                        "recv_est": recv_est,
+                    }
+                    return "[subagent] 任务被用户中断。"
+
                 raw_response = self.model_client.chat(
                     messages=messages,
                     tool_schemas=whitelist_schemas,
@@ -79,7 +98,11 @@ class SubagentRunner:
                         content += chunk.content
                         recv_est += len(chunk.content)
                         if on_progress:
+                            on_progress("text", {"text": chunk.content})
                             on_progress("token_update", {"sent": sent_est, "recv": recv_est})
+
+                    if chunk.thinking and on_progress:
+                        on_progress("thinking", {"text": chunk.thinking})
 
                     if chunk.tool_call_deltas:
                         for tc in chunk.tool_call_deltas:
@@ -164,4 +187,6 @@ class SubagentRunner:
                 f"[subagent] 达到最大迭代次数 ({max_iterations})，最后回复:\n{last_content}"
             )
         finally:
+            if out_history is not None:
+                out_history[:] = [m for m in messages if m.get("role") != "system"]
             _subagent_whitelist.reset(token)

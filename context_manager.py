@@ -61,8 +61,8 @@ class ContextManager:
     def shutdown(self) -> None:
         """优雅关闭后台压缩线程"""
         self._compress_queue.put(None)
-        if self._worker.is_alive():
-            self._worker.join(timeout=10)
+        # 不 join：/clear 后会新建 ContextManager，旧摘要结果已被丢弃，
+        # 等待积压的 LLM 摘要任务纯属浪费。daemon 线程跑完后因哨兵自然退出。
 
     def end_turn(self, user_msg: str, assistant_msg: str,
                  transcript: List[dict] = None) -> None:

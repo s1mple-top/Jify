@@ -98,6 +98,7 @@ class TeamWorker:
         system_prompt: str,
         whitelist: Set[str],
         max_iterations: int = 20,
+        interrupt_event: Optional[threading.Event] = None,
     ):
         self.worker_id = worker_id
         self.model_client = model_client
@@ -105,6 +106,7 @@ class TeamWorker:
         self.system_prompt = system_prompt
         self.whitelist = whitelist
         self.max_iterations = max_iterations
+        self._interrupt_event = interrupt_event
 
         self._task_queue: queue.Queue = queue.Queue()
         self._result_events: Dict[str, threading.Event] = {}
@@ -113,27 +115,71 @@ class TeamWorker:
         self._running = False
         self._lock = threading.Lock()
         self._stats = {"tasks_completed": 0, "total_elapsed": 0.0}
+        # 跨任务保留的对话上下文（不含 system），worker 线程串行读写，无需额外加锁
+        self._history: List[Dict] = []
 
         # 预构建 tool schemas
         self._whitelist_schemas: List[Dict] = []
 
-    def _build_progress_callback(self, task_snippet: str, start_time: float, tool_counter: list):
-        """构建进度回调：每隔几次工具调用更新 OutputEngine 状态行"""
-        engine = get_output_engine()
+    def _build_progress_callback(self, task_snippet: str, start_time: float, tool_counter: list, detail: Dict):
+        """构建进度回调：把 thinking/text/tool/token 细节累积到 detail 并同步到状态行。
 
-        def _on_progress(event_type: str, data: Dict) -> None:
-            if event_type == "tool_start":
-                tool_counter[0] += 1
+        detail 为可变 dict（由 _execute 持有引用），跨事件累积：
+        - thinking: 思考内容尾部（截断保留）
+        - text:     正文输出尾部（截断保留）
+        - tools:    最近若干次工具调用 [{name, args, result}]
+        - last_tool: 最近一次工具名
+        - sent_est / recv_est: token 估算
+        """
+        engine = get_output_engine()
+        _THINK_TAIL = 200
+        _TEXT_TAIL = 200
+        _MAX_TOOLS = 4
+
+        def _emit() -> None:
             info = {
                 "task": task_snippet,
                 "_start": start_time,
                 "tool_uses": tool_counter[0],
                 "status": "running",
+                "thinking": detail["thinking"],
+                "text": detail["text"],
+                "tools": list(detail["tools"]),
+                "last_tool": detail["last_tool"],
+                "sent_est": detail["sent_est"],
+                "recv_est": detail["recv_est"],
             }
             _emit_team_update(self.worker_id, info)
-            if not engine:
-                return
-            engine.set_team_worker(self.worker_id, info)
+            if engine:
+                engine.set_team_worker(self.worker_id, info)
+
+        def _on_progress(event_type: str, data: Dict) -> None:
+            if event_type == "tool_start":
+                tool_counter[0] += 1
+                name = data.get("name", "")
+                detail["last_tool"] = name
+                detail["tools"].append({
+                    "name": name,
+                    "args": data.get("args", {}),
+                    "result": "",
+                })
+                if len(detail["tools"]) > _MAX_TOOLS:
+                    detail["tools"] = detail["tools"][-_MAX_TOOLS:]
+            elif event_type == "tool_end":
+                name = data.get("name", "")
+                result = data.get("result", "")
+                for t in reversed(detail["tools"]):
+                    if t["name"] == name and not t["result"]:
+                        t["result"] = result
+                        break
+            elif event_type == "thinking":
+                detail["thinking"] = (detail["thinking"] + data.get("text", ""))[-_THINK_TAIL:]
+            elif event_type == "text":
+                detail["text"] = (detail["text"] + data.get("text", ""))[-_TEXT_TAIL:]
+            elif event_type == "token_update":
+                detail["sent_est"] = data.get("sent", 0)
+                detail["recv_est"] = data.get("recv", 0)
+            _emit()
 
         return _on_progress
 
@@ -232,6 +278,14 @@ class TeamWorker:
         task_snippet = task.content[:42] + "…" if len(task.content) > 42 else task.content
 
         engine = get_output_engine()
+        detail = {
+            "thinking": "",
+            "text": "",
+            "tools": [],
+            "last_tool": "",
+            "sent_est": 0,
+            "recv_est": 0,
+        }
         _emit_team_update(self.worker_id, {
             "task": task_snippet,
             "_start": start,
@@ -244,9 +298,15 @@ class TeamWorker:
                 "_start": start,
                 "tool_uses": 0,
                 "status": "running",
+                "thinking": "",
+                "text": "",
+                "tools": [],
+                "last_tool": "",
+                "sent_est": 0,
+                "recv_est": 0,
             })
 
-        on_progress = self._build_progress_callback(task_snippet, start, tool_counter)
+        on_progress = self._build_progress_callback(task_snippet, start, tool_counter, detail)
 
         runner = SubagentRunner(self.model_client, self.config)
         try:
@@ -257,8 +317,14 @@ class TeamWorker:
                 whitelist_names=self.whitelist,
                 max_iterations=self.max_iterations,
                 on_progress=on_progress, # 状态栏同步进展
+                interrupt_event=self._interrupt_event,
+                history=self._history,
+                out_history=self._history,
             )
-            task.status = "completed"
+            if self._interrupt_event is not None and self._interrupt_event.is_set():
+                task.status = "interrupted"
+            else:
+                task.status = "completed"
             task.result = result
         except Exception as e:
             task.status = "failed"
@@ -277,13 +343,28 @@ class TeamWorker:
                     "_start": start,
                     "tool_uses": tool_counter[0],
                     "status": task.status,
+                    "thinking": detail["thinking"],
+                    "text": detail["text"],
+                    "tools": list(detail["tools"]),
+                    "last_tool": detail["last_tool"],
+                    "sent_est": detail["sent_est"],
+                    "recv_est": detail["recv_est"],
                 })
             _emit_team_update(self.worker_id, {
                 "task": task_snippet,
                 "_start": start,
                 "tool_uses": tool_counter[0],
                 "status": task.status,
+                "thinking": detail["thinking"],
+                "text": detail["text"],
+                "tools": list(detail["tools"]),
+                "last_tool": detail["last_tool"],
+                "sent_est": detail["sent_est"],
+                "recv_est": detail["recv_est"],
             })
+
+        # 上下文记忆全量压缩：累积上下文长度达到阈值时同步压缩
+        self._maybe_compress_history()
 
         return json.dumps({
             "worker_id": self.worker_id,
@@ -302,6 +383,41 @@ class TeamWorker:
     def stats(self) -> Dict:
         with self._lock:
             return dict(self._stats)
+
+    def _maybe_compress_history(self) -> None:
+        """当累积上下文长度达到阈值时，同步做一次全量 LLM 压缩。
+
+        压缩把整个历史对话压成一段摘要文本，替换 self._history，后续任务
+        以摘要 + 新任务继续。采用全量（而非增量）压缩策略。
+        """
+        threshold = getattr(self.config, "context_compress_threshold", 1000000)
+        if not self._history:
+            return
+        if len(json.dumps(self._history, ensure_ascii=False)) < threshold:
+            return
+
+        full_text = "\n\n".join(
+            f"[{m.get('role', '')}] {m.get('content', '')}"
+            for m in self._history
+        )
+        prompt = (
+            "请对以下团队成员的过往任务对话进行压缩总结，保留用户意图、关键结果、"
+            "主要进展、已解决的问题，以及正在进行尚未完成的工作，压缩成模型可参考"
+            "的历史信息：\n\n" + full_text
+        )
+        try:
+            resp = self.model_client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                tool_schemas=[],
+                model=self.config.model,
+                stream=False,
+            )
+            summary = (resp.content or "").strip()
+        except Exception:
+            summary = ""
+
+        if summary:
+            self._history = [{"role": "user", "content": "=== 历史任务摘要 ===\n" + summary}]
 
 
 
@@ -323,6 +439,16 @@ class TeamLeader:
         self._workers: Dict[str, TeamWorker] = {}
         self._tasks: Dict[str, TeamTask] = {}
         self._lock = threading.Lock()
+        # Worker 共享中断信号：主 Agent Ctrl+C 时 set，Worker 在迭代边界检查后停止当前任务
+        self._interrupt_event = threading.Event()
+
+    def interrupt(self) -> None:
+        """中断所有 Worker 当前正在执行的任务。不关闭 Worker 线程与团队结构，中断后团队仍可继续委派。"""
+        self._interrupt_event.set()
+
+    def clear_interrupt(self) -> None:
+        """重置中断信号，供下一轮任务使用。"""
+        self._interrupt_event.clear()
 
 
     # Worker 管理
@@ -352,6 +478,7 @@ class TeamLeader:
                 system_prompt=system_prompt,
                 whitelist=whitelist,
                 max_iterations=max_iterations,
+                interrupt_event=self._interrupt_event,
             )
             worker.start()
             self._workers[worker_id] = worker
@@ -392,6 +519,8 @@ class TeamLeader:
         Returns:
             Worker 的输出结果
         """
+        self._interrupt_event.clear()
+
         task = TeamTask(
             id=str(uuid.uuid4()),
             content=task_content,
@@ -432,6 +561,8 @@ class TeamLeader:
         Returns:
             汇总 JSON: {"task_id": "result", ...}
         """
+        self._interrupt_event.clear()
+
         if worker_ids and len(worker_ids) != len(tasks):
             return "[TeamLeader] tasks 与 worker_ids 数量不匹配"
 

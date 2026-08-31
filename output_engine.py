@@ -10,9 +10,9 @@ import re
 import threading
 import termios
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
-from rich.console import Console as RichConsole
+from rich.console import Console as RichConsole, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.table import Table as RichTable
@@ -21,6 +21,19 @@ from rich.text import Text
 from rich.theme import Theme
 from pygments.styles.monokai import MonokaiStyle
 from pygments.styles.dracula import DraculaStyle
+
+# Team 状态栏框线：仅保留列间竖线（│），无顶部/底部横线、无左右边框，
+# 用于把多个 worker 的实时细节在状态栏里竖线分割并列展示。
+_TEAM_BOX = rich_box.Box(
+    "    \n"  # top
+    "  │ \n"  # head
+    "    \n"  # head_row
+    "  │ \n"  # mid
+    "  │ \n"  # row
+    "  │ \n"  # foot_row
+    "  │ \n"  # foot
+    "    \n"  # bottom
+)
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 _TABLE_SEP_RE = re.compile(r'^\s*\|[-\s:]+\|')
@@ -309,8 +322,9 @@ class OutputEngine:
                     team_workers: Optional[Dict] = None,
                     todos: Optional[list] = None,
                     subagent: Optional[Dict] = None,
-                    tip: str = "") -> Text:
+                    tip: str = "") -> Any:
         t = Text("")
+        team_table = None
 
         t.append("✦ ", style=f"italic {JifyTheme.SUBTLE}")
         if wave_offset:
@@ -355,20 +369,47 @@ class OutputEngine:
 
         if team_workers:
             now = time.time()
+            team_table = RichTable(box=_TEAM_BOX, show_header=False, padding=(0, 1), expand=False)
+            cells = []
             for wid, info in sorted(team_workers.items()):
                 task = info.get("task", "")
-                if len(task) > 42:
-                    task = task[:39] + "…"
+                if len(task) > 26:
+                    task = task[:23] + "…"
                 _start = info.get("_start")
                 if _start is not None:
-                    elapsed = now - _start
+                    w_elapsed = now - _start
                 else:
-                    elapsed = info.get("elapsed", 0)
+                    w_elapsed = info.get("elapsed", 0)
                 tool_uses = info.get("tool_uses", 0)
                 status = info.get("status", "running")
                 symbol = {"pending": "○", "running": "⏳", "completed": "✓", "failed": "✗"}.get(status, "⏳")
-                t.append("\n")
-                t.append(f'  ⚙ {wid}(task="{task}")  ({symbol} {self.fmt_elapsed(elapsed)} · {tool_uses} tools)', style=JifyTheme.SUBTLE)
+                last_tool = info.get("last_tool", "")
+                tools = info.get("tools") or []
+                sent_est = info.get("sent_est", 0)
+                recv_est = info.get("recv_est", 0)
+
+                cell = Text()
+                cell.append(f"{symbol} {wid}", style="bold yellow")
+                if task:
+                    cell.append(f"  {task}", style=JifyTheme.SUBTLE)
+                cell.append("\n", style=JifyTheme.SUBTLE)
+                cell.append(f"  {self.fmt_elapsed(w_elapsed)} · {tool_uses} tools", style=JifyTheme.SUBTLE)
+                if last_tool:
+                    cell.append(f" · {last_tool}", style=JifyTheme.GREEN)
+                if tools:
+                    for tool in tools[-4:]:
+                        cell.append("\n", style=JifyTheme.SUBTLE)
+                        args = tool.get("args") or {}
+                        args_str = json.dumps(args, ensure_ascii=False) if args else ""
+                        if len(args_str) > 80:
+                            args_str = args_str[:77] + "…"
+                        cell.append(f"  {tool['name']}({args_str})", style=JifyTheme.GREEN)
+                if sent_est or recv_est:
+                    cell.append("\n", style=JifyTheme.SUBTLE)
+                    cell.append(f"  ↑{self.fmt_tokens(sent_est // 2)} ↓{self.fmt_tokens(recv_est // 2)}", style=JifyTheme.SUBTLE)
+                cells.append(cell)
+                team_table.add_column()
+            team_table.add_row(*cells)
 
         if subagent:
             task = subagent.get("task", "")
@@ -422,6 +463,8 @@ class OutputEngine:
             t.append(f"\n")
             t.append(f"\n")
 
+        if team_table is not None:
+            return Group(t, team_table)
         return t
 
     # Lifecycle
