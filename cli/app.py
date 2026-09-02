@@ -47,6 +47,12 @@ from cli.console import CLIConsole
 from .bootstrap import ensure_jify_home
 from version_check import check_update
 
+try:
+    from importlib.metadata import version as _pkg_version
+    _VERSION = _pkg_version("jify")
+except Exception:
+    _VERSION = "0.0.0"
+
 console = JifyTheme.create_console()
 
 
@@ -1327,6 +1333,8 @@ def main() -> None:
                         help="关闭思考内容流式输出")
     parser.add_argument("--safe-exec", action="store_true", default=False,
                         help="启用 exec 命令白名单模式，拦截危险命令")
+    parser.add_argument("--version", action="store_true", default=False,
+                        help="输出版本号后退出")
 
     # gateway 子命令
     gw_parser = subparsers.add_parser("gateway", help="启动 Jify Gateway 服务")
@@ -1339,6 +1347,11 @@ def main() -> None:
     subparsers.add_parser("update", help="拉取远程最新版本并更新依赖环境")
 
     args, _ = parser.parse_known_args()
+
+    # 输出版本号
+    if args.version:
+        print(f"jify {_VERSION}")
+        return
 
     # 子命令路由
     if args.command == "gateway":
