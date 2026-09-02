@@ -7,6 +7,7 @@ from tools.builtin.file_tools import read_file, write_file
 from tools.builtin.patch_file import patch_file
 from tools.builtin.load_skill import load_skill
 from tools.builtin.static_analysis import static_analysis
+from tools.builtin.code_sandbox import code_sandbox
 # from tools.builtin.p2p_tools import p2p_send, get_all_peer_names    # P2P tools 暂时注销 Jify间的交互一期暂时不上
 from tools.builtin.mcp_tools import mcp_reload, mcp_list
 from tools.builtin.skill_create import skill_create

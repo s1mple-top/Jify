@@ -937,6 +937,21 @@ class OutputEngine:
                     escaped = escaped[:117] + "…"
                 return (f"• {name}", f'    ⎿ "{escaped}"')
 
+        if name == "code_sandbox":
+            lang = parsed.get("language", "")
+            code = parsed.get("code", "")
+            mock = parsed.get("mock_params", None)
+            if isinstance(code, str):
+                code_escaped = code.replace("\n", "\\n")
+                if len(code_escaped) > 120:
+                    code_escaped = code_escaped[:117] + "…"
+            else:
+                code_escaped = ""
+            parts = [str(lang), code_escaped]
+            if mock:
+                parts.append("mock=" + str(mock))
+            return (f"• {name}", '    ⎿ "' + " ".join(parts) + '"')
+
         name_line = f"• {name}"
 
         key = cls._TOOL_DISPLAY_KEY.get(name)
