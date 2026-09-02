@@ -43,6 +43,9 @@ jify --think-stream
 
 # 启用 exec 命令白名单安全模式，拦截危险命令
 jify --safe-exec
+
+# 查看jify版本
+jify --version
 ```
 
 首次运行会自动创建 `~/.jify/` 目录并生成默认配置。
