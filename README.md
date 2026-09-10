@@ -107,17 +107,18 @@ Jify 不是一成不变的工具，它会随着你的使用持续「生长」：
 Jify is not a fixed tool — it keeps "growing" with your usage:
 
  • 越聊越懂你：用得越久，它就越像「你自己」。
-It understands you better over time: the longer you use it, the more it feels like "you".
+ • It understands you better over time: the longer you use it, the more it feels like "you".
  • 踩过的坑不再踩：每次对话中的关键决策、踩坑经验都会被Jify自沉淀，后续遇到相似场景Jify会自动避坑。
-Avoid pitfalls: key decisions and hard-won lessons are automatically distilled, so Jify avoids the same traps in similar situations.
+ • Avoid pitfalls: key decisions and hard-won lessons are automatically distilled, so Jify avoids the same traps in similar situations.
  • 越用越顺手：Jify 会主动识别并建议固化,为Skill，你只需点个头，下次它就能一键搞定。
-It gets smoother: Jify proactively identifies and suggests consolidating behaviors into Skills — just approve, and next time it's one-click.
+ • It gets smoother: Jify proactively identifies and suggests consolidating behaviors into Skills — just approve, and next time it's one-click.
 
 
 ### 漏洞挖掘
 ### Vulnerability Discovery
 
 Jify 针对漏洞挖掘 / 安全审计提供专项能力，形成「发现 → 验证 → 沉淀 → 复用」闭环。
+
 Jify offers dedicated capabilities for vulnerability discovery / security audits, forming a "discover → verify → distill → reuse" closed loop.
 
 
@@ -133,6 +134,7 @@ jify gateway --port 9090
 ### Plugin System
 
 通过 Hook 机制扩展 Agent 行为。插件放置在 `~/.jify/plugins/`，支持的生命周期钩子包括 `before_prompt_build`、`after_prompt_build`、`llm_input`、`before_api_call`、`after_api_call`、`before_tool_call`、`after_tool_call`、`llm_output` 等。
+
 Extend Agent behavior via hooks. Plugins live in `~/.jify/plugins/`, supporting lifecycle hooks such as `before_prompt_build`, `after_prompt_build`, `llm_input`, `before_api_call`, `after_api_call`, `before_tool_call`, `after_tool_call`, `llm_output`, etc.
 
 亦可透过插件系统注册自定义Tool
@@ -142,12 +144,14 @@ Custom tools can also be registered through the plugin system.
 ### MCP Support
 
 内置 MCP (Model Context Protocol) 客户端，通过 `~/.jify/mcp_servers.json` 配置文件集成外部工具服务。
+
 A built-in MCP (Model Context Protocol) client integrates external tool services via the `~/.jify/mcp_servers.json` config file.
 
 ### 模型配置
 ### Model Configuration
 
 首次启动会自动构建 ~/.jify 目录，请在其下的 config.yaml 里配置需要的模型
+
 On first launch, the `~/.jify` directory is built automatically; configure your models in `config.yaml` under it.
 
 ## License
