@@ -5,6 +5,8 @@ Jify Agent（Self-evolving harness Agent）是一款通用智能体，运行在�
 
 Jify Agent (Self-evolving harness Agent) is a general-purpose intelligent agent — a personal AI assistant that runs on your own device. It helps you with programming tasks, security audits (vulnerability discovery via black-box/white-box analysis), code analysis, CTF challenges, and penetration testing.
 
+Star ++
+
 
 https://github.com/user-attachments/assets/68095fbc-9af2-4019-b8d9-512a754b2d6d
 
@@ -104,13 +106,19 @@ Type `/` in a chat to trigger autocompletion:
 ### Self-evolving Engine
 
 Jify 不是一成不变的工具，它会随着你的使用持续「生长」：
+
 Jify is not a fixed tool — it keeps "growing" with your usage:
 
  • 越聊越懂你：用得越久，它就越像「你自己」。
+
  • It understands you better over time: the longer you use it, the more it feels like "you".
+
  • 踩过的坑不再踩：每次对话中的关键决策、踩坑经验都会被Jify自沉淀，后续遇到相似场景Jify会自动避坑。
- • Avoid pitfalls: key decisions and hard-won lessons are automatically distilled, so Jify avoids the same traps in similar situations.
- • 越用越顺手：Jify 会主动识别并建议固化,为Skill，你只需点个头，下次它就能一键搞定。
+
+ • Avoid pitfalls: key decisions and hard-won lessons are automatically distilled, so Jify avoids the same traps in similar situations. 
+
+• 越用越顺手：Jify 会主动识别并建议固化,为Skill，你只需点个头，下次它就能一键搞定。
+
  • It gets smoother: Jify proactively identifies and suggests consolidating behaviors into Skills — just approve, and next time it's one-click.
 
 
