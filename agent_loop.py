@@ -583,7 +583,8 @@ class AgentLoop:
                 tool_calls=tool_calls,
             ))
 
-            event_bus.put(UIEvent("Token_Send", len(text_content or "") // 2))
+            # 统一约定：事件里传原始字符数，显示层统一做一次 //2 换算 token
+            event_bus.put(UIEvent("Token_Send", len(text_content or "")))
 
             # 清空 reasoning_content，下轮 consume_stream 会重新填充
             console.last_reasoning_content = ""
@@ -600,9 +601,9 @@ class AgentLoop:
                     tool_call_id=tc_result.id,
                 ))
 
-                # 工具执行结果也会随 messages 发送给模型，估算 token 数计入 sent，其余的toolcallid上方塞入
+                # 工具执行结果也会随 messages 发送给模型，估算 token 数计入 sent，其余 toolcallid 上方塞入
                 if content:
-                    event_bus.put(UIEvent("Token_Send", len(content) // 2))
+                    event_bus.put(UIEvent("Token_Send", len(content)))
 
                 # 单独领出来可以考虑放弃掉某些tool的结果，减少token的效果，不过效果会下降
                 _turn_transcript.append({

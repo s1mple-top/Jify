@@ -65,8 +65,9 @@ class SubagentRunner:
                 messages.extend(history)
             messages.append({"role": "user", "content": task})
 
-            # 用消息字符串长度估算初始发送 token（与主 agent 的估算方式一致）
-            sent_est = len(json.dumps(messages, ensure_ascii=False))
+            # 与主 Agent 对齐：sent 为累计发送量（本轮新增内容原始字符数累加），
+            # 而非当前上下文全量大小；初始上下文不计入 sent。
+            sent_est = 0
             if on_progress:
                 on_progress("token_update", {"sent": sent_est, "recv": recv_est})
 
@@ -101,8 +102,12 @@ class SubagentRunner:
                             on_progress("text", {"text": chunk.content})
                             on_progress("token_update", {"sent": sent_est, "recv": recv_est})
 
-                    if chunk.thinking and on_progress:
-                        on_progress("thinking", {"text": chunk.thinking})
+                    if chunk.thinking:
+                        # thinking（推理）同样发给模型，按原始字符数计入 recv，与主 Agent 口径一致
+                        recv_est += len(chunk.thinking)
+                        if on_progress:
+                            on_progress("thinking", {"text": chunk.thinking})
+                            on_progress("token_update", {"sent": sent_est, "recv": recv_est})
 
                     if chunk.tool_call_deltas:
                         for tc in chunk.tool_call_deltas:
@@ -149,8 +154,8 @@ class SubagentRunner:
                     "tool_calls": tool_calls,
                 }
                 messages.append(assistant_msg)
-                # assistant 消息在下一轮会发送给模型，提前计入 sent_est
-                sent_est += len(json.dumps(assistant_msg, ensure_ascii=False))
+                # assistant 正文在下一轮会发送给模型，按原始字符数计入 sent（与主 Agent 一致）
+                sent_est += len(content)
 
                 for tc in tool_calls:
                     tool_name = tc["function"]["name"]
@@ -171,8 +176,8 @@ class SubagentRunner:
                         "tool_call_id": tc["id"],
                     }
                     messages.append(tool_msg)
-                    # 每追加一条 tool 结果消息，提前计入下一轮发送量
-                    sent_est += len(json.dumps(tool_msg, ensure_ascii=False))
+                    # 每追加一条 tool 结果消息，按原始字符数计入发送量（与主 Agent 一致）
+                    sent_est += len(result)
 
                 if on_progress:
                     on_progress("token_update", {"sent": sent_est, "recv": recv_est})
