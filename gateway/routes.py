@@ -109,7 +109,7 @@ def _ensure_team_initialized(agent: AgentLoop, config) -> None:
     if get_leader() is not None:
         return
     try:
-        orch = TeamOrchestrator(agent.model_client, config)
+        orch = TeamOrchestrator(lambda: agent.model_client, config)
         set_leader(orch.leader)
     except Exception:
         # 与顶部 plugin loader 一致：team 初始化失败不应阻断 gateway 启动

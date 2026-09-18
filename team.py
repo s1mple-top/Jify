@@ -101,6 +101,8 @@ class TeamWorker:
         interrupt_event: Optional[threading.Event] = None,
     ):
         self.worker_id = worker_id
+        # model_client 可以是实例，也可以是返回实例的 callable（延迟解析），
+        # 后者用于在主 Agent 切换模型/provider 后让 Worker 跟随当前模型。
         self.model_client = model_client
         self.config = config
         self.system_prompt = system_prompt
@@ -121,20 +123,36 @@ class TeamWorker:
         # 预构建 tool schemas
         self._whitelist_schemas: List[Dict] = []
 
+    def _resolve_model_client(self) -> Any:
+        """解析出当前应使用的 model client。
+
+        model_client 为 callable 时每次解析（跟随主 Agent 切换），否则直接用实例。
+        """
+        mc = self.model_client
+        return mc() if callable(mc) else mc
+
     def _build_progress_callback(self, task_snippet: str, start_time: float, tool_counter: list, detail: Dict):
         """构建进度回调：把 thinking/text/tool/token 细节累积到 detail 并同步到状态行。
 
         detail 为可变 dict（由 _execute 持有引用），跨事件累积：
-        - thinking: 思考内容尾部（截断保留）
-        - text:     正文输出尾部（截断保留）
-        - tools:    最近若干次工具调用 [{name, args, result}]
+        - stream:   统一活动流 [{kind: think|text|tool, text}]，按发生顺序混排，
+                    think / 正文 / 工具调用共用同一条滚动队列（新行滚入、旧行滚出）。
         - last_tool: 最近一次工具名
         - sent_est / recv_est: token 估算
         """
         engine = get_output_engine()
-        _THINK_TAIL = 200
-        _TEXT_TAIL = 200
-        _MAX_TOOLS = 4
+        _SEG_TAIL = 300    # 单条 think/text 尾部保留字符数
+        _STREAM_MAX = 40   # 活动流条目上限
+
+        def _push(kind: str, text: str) -> None:
+            """追加活动流条目；think/text 与上一条同类型时合并（连续流式内容）。"""
+            stream = detail["stream"]
+            if kind in ("think", "text") and stream and stream[-1]["kind"] == kind:
+                stream[-1]["text"] = (stream[-1]["text"] + text)[-_SEG_TAIL:]
+            else:
+                stream.append({"kind": kind, "text": text})
+            if len(stream) > _STREAM_MAX:
+                del stream[:-_STREAM_MAX]
 
         def _emit() -> None:
             info = {
@@ -142,9 +160,7 @@ class TeamWorker:
                 "_start": start_time,
                 "tool_uses": tool_counter[0],
                 "status": "running",
-                "thinking": detail["thinking"],
-                "text": detail["text"],
-                "tools": list(detail["tools"]),
+                "stream": list(detail["stream"]),
                 "last_tool": detail["last_tool"],
                 "sent_est": detail["sent_est"],
                 "recv_est": detail["recv_est"],
@@ -158,24 +174,15 @@ class TeamWorker:
                 tool_counter[0] += 1
                 name = data.get("name", "")
                 detail["last_tool"] = name
-                detail["tools"].append({
-                    "name": name,
-                    "args": data.get("args", {}),
-                    "result": "",
-                })
-                if len(detail["tools"]) > _MAX_TOOLS:
-                    detail["tools"] = detail["tools"][-_MAX_TOOLS:]
-            elif event_type == "tool_end":
-                name = data.get("name", "")
-                result = data.get("result", "")
-                for t in reversed(detail["tools"]):
-                    if t["name"] == name and not t["result"]:
-                        t["result"] = result
-                        break
+                args = data.get("args", {}) or {}
+                args_str = json.dumps(args, ensure_ascii=False) if args else ""
+                if len(args_str) > 80:
+                    args_str = args_str[:77] + "\u2026"
+                _push("tool", f"{name}({args_str})")
             elif event_type == "thinking":
-                detail["thinking"] = (detail["thinking"] + data.get("text", ""))[-_THINK_TAIL:]
+                _push("think", data.get("text", ""))
             elif event_type == "text":
-                detail["text"] = (detail["text"] + data.get("text", ""))[-_TEXT_TAIL:]
+                _push("text", data.get("text", ""))
             elif event_type == "token_update":
                 detail["sent_est"] = data.get("sent", 0)
                 detail["recv_est"] = data.get("recv", 0)
@@ -279,9 +286,7 @@ class TeamWorker:
 
         engine = get_output_engine()
         detail = {
-            "thinking": "",
-            "text": "",
-            "tools": [],
+            "stream": [],
             "last_tool": "",
             "sent_est": 0,
             "recv_est": 0,
@@ -298,9 +303,7 @@ class TeamWorker:
                 "_start": start,
                 "tool_uses": 0,
                 "status": "running",
-                "thinking": "",
-                "text": "",
-                "tools": [],
+                "stream": [],
                 "last_tool": "",
                 "sent_est": 0,
                 "recv_est": 0,
@@ -308,7 +311,7 @@ class TeamWorker:
 
         on_progress = self._build_progress_callback(task_snippet, start, tool_counter, detail)
 
-        runner = SubagentRunner(self.model_client, self.config)
+        runner = SubagentRunner(self._resolve_model_client(), self.config)
         try:
             result = runner.run(
                 task=task.content,
@@ -343,9 +346,7 @@ class TeamWorker:
                     "_start": start,
                     "tool_uses": tool_counter[0],
                     "status": task.status,
-                    "thinking": detail["thinking"],
-                    "text": detail["text"],
-                    "tools": list(detail["tools"]),
+                    "stream": list(detail["stream"]),
                     "last_tool": detail["last_tool"],
                     "sent_est": detail["sent_est"],
                     "recv_est": detail["recv_est"],
@@ -355,9 +356,7 @@ class TeamWorker:
                 "_start": start,
                 "tool_uses": tool_counter[0],
                 "status": task.status,
-                "thinking": detail["thinking"],
-                "text": detail["text"],
-                "tools": list(detail["tools"]),
+                "stream": list(detail["stream"]),
                 "last_tool": detail["last_tool"],
                 "sent_est": detail["sent_est"],
                 "recv_est": detail["recv_est"],
@@ -406,7 +405,7 @@ class TeamWorker:
             "的历史信息：\n\n" + full_text
         )
         try:
-            resp = self.model_client.chat(
+            resp = self._resolve_model_client().chat(
                 messages=[{"role": "user", "content": prompt}],
                 tool_schemas=[],
                 model=self.config.model,
@@ -543,7 +542,16 @@ class TeamLeader:
 
             task.worker_id = w.worker_id
 
-        return w.submit_and_wait(task, timeout=timeout)
+        result = w.submit_and_wait(task, timeout=timeout)
+
+        # 与 delegate_parallel 对齐：单 worker 委派结束后也清理状态行残留，
+        # 否则 _execute 写入的 completed/failed 记录会滞留到整轮 finalize()
+        engine = get_output_engine()
+        if engine:
+            engine.clear_team_workers()
+        _emit_team_update(None, None, clear=True)
+
+        return result
 
     def delegate_parallel(
         self,

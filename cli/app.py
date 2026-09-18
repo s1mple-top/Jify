@@ -258,9 +258,10 @@ class JifyCLI:
         self.cli_console = CLIConsole(think_stream)
 
         # Team Mode: 初始化 TeamOrchestrator（仅注册 leader，不启动 Worker）
+        # 传入 callable 延迟解析 client，使 Worker 跟随主 Agent 当前切换的模型/provider
         from team import TeamOrchestrator, set_leader, set_output_engine
         from tools.approval import set_approval_engine
-        self._team_orch = TeamOrchestrator(self.agent.model_client, self.config)
+        self._team_orch = TeamOrchestrator(lambda: self.agent.model_client, self.config)
         set_leader(self._team_orch.leader)
         set_output_engine(self.cli_console._output)
         set_approval_engine(self.cli_console._output)

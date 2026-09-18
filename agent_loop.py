@@ -178,9 +178,9 @@ def _get_provider_extra_body(config: "AgentConfig") -> dict:
     model = (config.model or "").lower()
     extra = {}
 
-    if "minimax" in base or model.startswith("minimax"):
-        extra["reasoning_split"] = True
-        extra["include_usage"] = True
+    # if "minimax" in base or model.startswith("minimax"):
+    #     extra["reasoning_split"] = True
+    #     extra["include_usage"] = True
     if "bigmodel.cn" in base or model.startswith("glm"):  # GLM think模式默认开启
         extra["thinking"] = {"type":"enabled"}
     if "deepseek.com" in base or model.startswith("deepseek"):

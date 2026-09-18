@@ -325,6 +325,8 @@ class OutputEngine:
                     tip: str = "") -> Any:
         t = Text("")
         team_table = None
+        # team worker 统一活动流展示行数上限：think / 正文 / tool 共用同一预算
+        _MAX_STREAM_LINES = 10
 
         t.append("✦ ", style=f"italic {JifyTheme.SUBTLE}")
         if wave_offset:
@@ -384,7 +386,6 @@ class OutputEngine:
                 status = info.get("status", "running")
                 symbol = {"pending": "○", "running": "⏳", "completed": "✓", "failed": "✗"}.get(status, "⏳")
                 last_tool = info.get("last_tool", "")
-                tools = info.get("tools") or []
                 sent_est = info.get("sent_est", 0)
                 recv_est = info.get("recv_est", 0)
 
@@ -396,19 +397,28 @@ class OutputEngine:
                 cell.append(f"  {self.fmt_elapsed(w_elapsed)} · {tool_uses} tools", style=JifyTheme.SUBTLE)
                 if last_tool:
                     cell.append(f" · {last_tool}", style=JifyTheme.GREEN)
-                if tools:
-                    for tool in tools[-4:]:
-                        cell.append("\n", style=JifyTheme.SUBTLE)
-                        args = tool.get("args") or {}
-                        args_str = json.dumps(args, ensure_ascii=False) if args else ""
-                        if len(args_str) > 80:
-                            args_str = args_str[:77] + "…"
-                        cell.append(f"  {tool['name']}({args_str})", style=JifyTheme.GREEN)
+
+                # worker 统一活动流：think / 正文 / tool 按发生顺序混排，共用同一行预算，
+                # 新活动滚入、旧行自动滚出（与主 Agent 的交互式输出一致，不做累积清单）
+                flat = []
+                for entry in info.get("stream") or []:
+                    kind = entry.get("kind", "text")
+                    for ln in (entry.get("text") or "").splitlines():
+                        if ln.strip():
+                            flat.append((kind, ln))
+                for kind, ln in flat[-_MAX_STREAM_LINES:]:
+                    label, style = {
+                        "think": ("✻", JifyTheme.SUBTLE),
+                        "text": ("▸", JifyTheme.SUBTLE),
+                        "tool": ("•", JifyTheme.GREEN),
+                    }.get(kind, ("·", JifyTheme.SUBTLE))
+                    cell.append("\n", style=JifyTheme.SUBTLE)
+                    cell.append(f"  {label} {ln}", style=style)
                 if sent_est or recv_est:
                     cell.append("\n", style=JifyTheme.SUBTLE)
                     cell.append(f"  ↑{self.fmt_tokens(sent_est // 2)} ↓{self.fmt_tokens(recv_est // 2)}", style=JifyTheme.SUBTLE)
                 cells.append(cell)
-                team_table.add_column()
+                team_table.add_column(overflow="fold")
             team_table.add_row(*cells)
 
         if subagent:
