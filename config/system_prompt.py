@@ -12,7 +12,7 @@ from typing import Optional
 # Placeholders:
 #   {skills}         — formatted skill list string
 #   {experience}     — experience section string (with "## 历史经验\n" prefix or empty)
-#   {profile_section}— user profile/preferences section (with "## 用户偏好\n" prefix or empty)
+#   {profile_section}— user profile/preferences bullet list (no section header, or empty)
 #   {ts}             — current time string (e.g. "2026年06月23日 Tuesday")
 #   {cwd}            — current working directory
 

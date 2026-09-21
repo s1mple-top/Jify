@@ -214,4 +214,4 @@ class UserProfileExtractor:
         if not parts:
             return ""
 
-        return "## 用户偏好\n" + "\n".join(parts)
+        return "\n".join(parts)
