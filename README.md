@@ -167,3 +167,7 @@ A built-in MCP (Model Context Protocol) client integrates external tool services
 On first launch, the `~/.jify` directory is built automatically; configure your models in `config.yaml` under it.
 
 ## License
+
+本项目采用 MIT License 开源，详见 [LICENSE](LICENSE)。
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
