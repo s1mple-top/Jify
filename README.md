@@ -5,7 +5,11 @@ Jify Agent（Self-evolving harness Agent）是一款通用智能体，运行在�
 
 Jify Agent (Self-evolving harness Agent) is a general-purpose intelligent agent — a personal AI assistant that runs on your own device. It helps you with programming tasks, security audits (vulnerability discovery via black-box/white-box analysis), code analysis, CTF challenges, and penetration testing.
 
-Star ++
+如果 Jify 对你有帮助，欢迎点个 Star 支持一下，这是对作者最大的鼓励。
+
+If Jify helps you, please give it a Star — it means a lot.
+
+[![Star](https://img.shields.io/github/stars/s1mple-top/Jify?style=social)](https://github.com/s1mple-top/Jify)
 
 
 https://github.com/user-attachments/assets/68095fbc-9af2-4019-b8d9-512a754b2d6d
