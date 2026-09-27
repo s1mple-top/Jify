@@ -225,7 +225,7 @@ async def api_get_config():
         "tool_timeout": raw.get("tool_timeout", 120.0),
         "SelfEvolutionModel": raw.get("SelfEvolutionModel", ""),
         "SelfEvolutionTurn": raw.get("SelfEvolutionTurn", 8),
-        "context_compress_threshold": raw.get("context_compress_threshold", 900000),
+        "context_compress_threshold": raw.get("context_compress_threshold", 700000),
         "admin_token": raw.get("admin_token", ""),
         "plugins_dir": raw.get("plugins_dir", "~/.jify/plugins"),
         "enabled_plugins": raw.get("enabled_plugins", None),

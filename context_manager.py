@@ -2,10 +2,27 @@
 """
 上下文管理器
 
-维护跨轮次对话历史和会话摘要，供 gateway 和 agent_loop 统一使用。
-- turn_history: 最近 N 轮完整记录（轮次级）
-- session_summary: 超出窗口的旧轮次压缩为摘要文本
-- 超出摘要长度上限时通过 summarizer（LLM）做二次压缩
+维护跨轮次对话历史的**旁路摘要**（session_summary）与待压缩轮次缓冲，供 agent_loop 使用。
+
+设计要点（配合 append-only 消息序列）：
+- 真正的对话历史就是 agent_loop 中的 messages 序列（user/assistant/tool 逐条 append，不再重格式化）
+- 本模块只负责「旁路预算」：每 INCREMENTAL_COMPRESS_INTERVAL 轮把新轮次异步折叠进 session_summary
+- 摘要产物**不进入请求序列**；只有当 agent_loop 检测到上下文超阈值时，才把 session_summary
+  作为**一条合成消息**注入到序列前端（一次性前缀替换），其余轮次继续 append
+- _pending_compress 始终表示「尚未折叠进 session_summary 的轮次」；
+  只有后台压缩**成功后**才从缓冲移除，避免折叠瞬间出现内容缺口
+
+超阈值折叠的两条路径（由 agent_loop._compact_prefix 实现）：
+- 路径 A（有可直接替换的旧正文）：用 session_summary 替换前缀，【零同步 LLM 调用】
+- 路径 B（无可替换内容，即旧正文已全部摘要化）：把「现有摘要 + 未压缩轮次原文」
+  合并压缩成新摘要后整体替换（**同步一次 LLM**），立即收敛，不必等攒够 4 轮
+
+发送前预检语义（agent_loop._maybe_compact_prefix(preserve_current=True)）：
+- 检查点从「迭代末」提前到「发请求前」，防止单次 tool 结果暴涨一步跨过真实模型窗口
+- 预检模式下无旁路摘要时【只压本轮之前的历史，保留本轮 user 原文】；第一轮无历史
+  可压则不动作。原因：此轮尚未产出回复，若压「含本轮」会把用户真实问题摘要化后
+  发给模型，语义错误
+- 迭代末（preserve_current=False）触发时本轮已产出回复，才允许「含本轮」兜底全量
 """
 
 import queue
@@ -20,6 +37,7 @@ class TurnRecord:
     assistant_msg: str
     intent: str = ""  # 用户本轮意图快照（user_msg 前 100 字），供压缩时参考
     transcript: List[dict] = field(default_factory=list)
+    start_idx: int = 0  # 本轮在 messages 中的起始下标（用于计算「已压缩边界」）
 
     def __post_init__(self):
         """自动从 user_msg 提取 intent（若未显式传入）。"""
@@ -28,35 +46,32 @@ class TurnRecord:
 
 
 class ContextManager:
-    """跨轮次上下文管理。
+    """跨轮次旁路上下文管理。
 
-    采用增量压缩策略：每 INCREMENTAL_COMPRESS_INTERVAL 轮将新轮次压缩
-    追加到 session_summary，每次只处理「已有摘要 + 新轮次」，避免全量
-    压缩带来的 token 开销。
+    采用增量压缩策略：每 INCREMENTAL_COMPRESS_INTERVAL 轮将新轮次异步折叠进
+    session_summary，避免全量压缩带来的 token 开销。
 
     Attributes:
-        turn_history: 最近 N 轮完整 TurnRecord
-        session_summary: 旧轮次压缩后的文本摘要
+        session_summary: 旧轮次压缩后的文本摘要（旁路产物，不主动注入请求）
         summarizer: LLM 摘要函数，签名 (prompt: str) -> str
+        _pending_compress: 尚未折叠进 session_summary 的轮次
     """
 
     # 常量
-    # MAX_RECENT_TURNS = 8               # 保留最近 N 轮完整记录
     INCREMENTAL_COMPRESS_INTERVAL = 4  # 每 N 轮触发一次增量压缩
     MAX_SESSION_SUMMARY_CHARS = 120000   # session_summary 最大字符数，超限触发 LLM 二次压缩
-    KEEP_RECENT_TURNS = 2              # 截断时至少保留的未压缩轮数
 
     def __init__(self, summarizer: Optional[Callable[[str], str]] = None):
-        self.turn_history: List[TurnRecord] = []
         self.session_summary: str = ""
         self.summarizer = summarizer
-        self._pending_compress: List[TurnRecord] = []  # 等待增量压缩的轮次
+        self._pending_compress: List[TurnRecord] = []  # 尚未折叠进摘要的轮次
+        self._skip_pending_once: bool = False  # 兜底整体压缩已含当前轮，下一轮 end_turn 跳过入 pending
+        self._summary_lock = threading.Lock()
 
         # 单一后台线程串行消费压缩任务，消除并发写入冲突
         self._compress_queue: queue.Queue = queue.Queue()
         self._worker = threading.Thread(target=self._compress_worker, daemon=True)
         self._worker.start()
-
 
     def shutdown(self) -> None:
         """优雅关闭后台压缩线程"""
@@ -65,13 +80,13 @@ class ContextManager:
         # 等待积压的 LLM 摘要任务纯属浪费。daemon 线程跑完后因哨兵自然退出。
 
     def end_turn(self, user_msg: str, assistant_msg: str,
-                 transcript: List[dict] = None) -> None:
-        """结束一轮对话，添加到 turn_history。
+                 transcript: List[dict] = None, start_idx: int = 0) -> None:
+        """结束一轮对话，将本轮加入待压缩缓冲，并按节奏触发后台增量压缩。
 
         增量压缩策略：
         1. 新轮次加入 _pending_compress 缓冲区
-        2. 每 INCREMENTAL_COMPRESS_INTERVAL 轮将缓冲区放入压缩队列，
-           由后台线程串行消费，读取当前 session_summary 做增量压缩
+        2. 每 INCREMENTAL_COMPRESS_INTERVAL 轮将缓冲区快照入队，由后台线程
+           串行消费（压缩成功后从缓冲区移除，避免折叠瞬间缺口）
         3. 若 session_summary 仍超长，也入队触发 LLM 二次压缩
 
         所有 LLM 调用均通过队列异步处理，end_turn 立即返回。
@@ -82,11 +97,18 @@ class ContextManager:
             assistant_msg=assistant_msg,
             intent=intent,
             transcript=transcript or [],
+            start_idx=start_idx,
         )
-        self.turn_history.append(record)
+
+        # 兜底整体压缩（_compact_prefix 无摘要分支）已把本轮内容并入 session_summary，
+        # 本轮不应重复入 pending，否则会被增量压缩二次概括，造成内容重复与 start_idx 冲突。
+        if self._skip_pending_once:
+            self._skip_pending_once = False
+            return
+
         self._pending_compress.append(record)
 
-        # 增量压缩：每 N 轮将缓冲区入队
+        # 增量压缩：每 N 轮将缓冲区快照入队
         if len(self._pending_compress) >= self.INCREMENTAL_COMPRESS_INTERVAL:
             if self.summarizer:
                 pending_snapshot = list(self._pending_compress)
@@ -96,83 +118,84 @@ class ContextManager:
                 for t in self._pending_compress:
                     sep = "\n\n" if self.session_summary else ""
                     self.session_summary += sep + self._format_turn(t)
-            self._pending_compress.clear()
+                self._pending_compress.clear()
 
         # 安全兜底：session_summary 超长 → 入队触发二次压缩
         if (self.summarizer
                 and len(self.session_summary) > self.MAX_SESSION_SUMMARY_CHARS):
             self._compress_queue.put(("compact",))
 
-    # # 系统上下文构建
-    # def build_system_context(self, token_budget: int = 3000) -> str:
-    #     """构建注入 system prompt 的会话上下文。
-    #
-    #     截断到 token_budget * 4 字符（粗略估计），避免挤占 system prompt。
-    #
-    #     Args:
-    #         token_budget: 分配给该上下文的 token 上限
-    #
-    #     Returns:
-    #         截断后的会话摘要文本；无摘要则返回空字符串
-    #     """
-    #     summary = self.get_session_summary()
-    #     if not summary:
-    #         return ""
-    #     max_chars = token_budget * 4
-    #     if len(summary) <= max_chars:
-    #         return summary
-    #     return summary[:max_chars]
-
-    def build_user_context(self, user_message: str) -> str:
-        """构建用户消息（拼接全部对话历史）。
-
-        不主动前置摘要——摘要仅在超阈值压缩时由 _rebuild_messages 注入。
-        正常流程保留完整上下文，确保压缩前模型能看到全部细节。
-
-        Args:
-            user_message: 用户当前输入
-        Returns:
-            全部历史轮次 + 当前输入的组合文本；首轮直接返回原始消息
-        """
-        if not self.turn_history:
-            return user_message
-
-        parts = ["=== 对话历史 ==="]
-        for t in self.turn_history:
-            parts.append(self._format_turn(t))
-        parts.append("")
-        parts.append("=== 当前消息 ===")
-        parts.append(user_message)
-
-        return "\n".join(parts)
-
-    # 摘要输出
     def get_session_summary(self) -> str:
-        """返回完整会话摘要：session_summary + turn_history 格式化文本。"""
-        parts = []
-        if self.session_summary:
-            parts.append(self.session_summary)
-        for t in self.turn_history:
-            parts.append(self._format_turn(t))
-        return "\n\n".join(parts) if parts else ""
+        """返回旁路摘要文本（仅 session_summary 本身，不含未压缩轮次）。"""
+        return self.session_summary
 
-    def build_compression_context(self) -> str:
-        """构建压缩用的结构化上下文，保留用户意图、关键行为、关键结果。"""
-        return self.get_session_summary()
+    def get_compress_boundary(self, default_idx: int) -> int:
+        """返回 session_summary 已覆盖到的 messages 边界下标。
 
-    def truncate_compressed_turns(self) -> bool:
-        """移除已被增量压缩过的旧轮次，只保留未被压缩的最近轮次。
+        即「最老未压缩轮次」的起始下标：该下标之前的全部内容都已折进
+        session_summary，可安全用摘要替换；其后（pending 轮次）尚未压缩，
+        须原样保留在正文，避免出现「既不在摘要、又被删除」的内容缺口。
+
+        若无 pending（全部轮次均已压缩），返回 default_idx（当前轮起点）。
         """
-        if not self.session_summary:
-            return False
+        if self._pending_compress:
+            return min(t.start_idx for t in self._pending_compress)
+        return default_idx
 
-        pending_count = len(self._pending_compress)
-        keep_count = pending_count if pending_count > 0 else self.KEEP_RECENT_TURNS
-        if len(self.turn_history) <= keep_count:
-            return False
+    def rebase(self, shift: int) -> None:
+        """替换前缀后，同步平移所有未压缩轮次记录的 start_idx。
 
-        self.turn_history = self.turn_history[-keep_count:]
-        return True
+        只在确实有 pending 时生效；shift 为 messages 前缀缩减量。
+        """
+        if shift == 0:
+            return
+        for t in self._pending_compress:
+            t.start_idx += shift
+
+    def flush_pending_sync(self) -> bool:
+        """同步把待压缩轮次折叠进 session_summary。
+
+        供 agent_loop 在**前缀折叠前**调用，确保 session_summary 覆盖到折叠边界，
+        避免出现「既不在摘要、又被折叠掉」的内容缺口。仅在确实有 pending 时才调 LLM。
+
+        Returns:
+            True 表示 pending 已成功折叠（或本就为空），session_summary 已覆盖折叠边界；
+            False 表示 LLM 摘要失败，pending 未折叠，调用方需重试或降级全量压缩。
+        """
+        if not self.summarizer:
+            return True
+        with self._summary_lock:
+            turns = list(self._pending_compress)
+            if not turns:
+                return True
+            new_turns_text = "\n\n".join(self._format_turn(t) for t in turns)
+            current_summary = self.session_summary
+            if current_summary:
+                prompt = (
+                    "以下是之前对话的摘要，请严格保留其全部内容，"
+                    "只能追加、不能删除或修改已有摘要中的任何内容：\n\n"
+                    f"{current_summary}\n\n"
+                    "以下是新的对话轮次，请将其中的用户意图、关键结果、"
+                    "主要进展、正在进行还未完成的工作追加整合到摘要末尾：\n\n"
+                    f"{new_turns_text}"
+                )
+            else:
+                prompt = (
+                    "请总结以下对话轮次中的用户意图、关键结果和主要进展，"
+                    "要求尽可能简洁但保留核心：\n\n"
+                    f"{new_turns_text}"
+                )
+            try:
+                result = self.summarizer(prompt)
+            except Exception:
+                return False
+            if not result:
+                return False
+            self.session_summary = result
+            self._pending_compress = [
+                t for t in self._pending_compress if t not in turns
+            ]
+            return True
 
     # 内部辅助
     @staticmethod
@@ -196,7 +219,6 @@ class ContextManager:
             return "\n".join(lines)
         return f"用户: {t.user_msg}\nJify: {t.assistant_msg}"
 
-
     def _compress_worker(self) -> None:
         """后台线程：串行消费压缩队列，消除并发写入冲突。"""
         while True:
@@ -210,57 +232,55 @@ class ContextManager:
                 self._do_compact()
 
     def _do_incremental_compress(self, pending_turns: List[TurnRecord]) -> None:
-        """增量压缩：基于当前 session_summary 追加新轮次信息。
-        """
-        new_turns_text = "\n\n".join(
-            self._format_turn(t) for t in pending_turns
-        )
+        """增量压缩：基于当前 session_summary 追加新轮次信息。成功后从缓冲移除。"""
+        with self._summary_lock:
+            # 已被 flush 处理过的轮次可能已不在 pending，过滤掉
+            turns = [t for t in pending_turns if t in self._pending_compress]
+            if not turns:
+                return
+            new_turns_text = "\n\n".join(self._format_turn(t) for t in turns)
 
-        current_summary = self.session_summary
-        if current_summary:
-            prompt = (
-                "以下是之前对话的摘要，请严格保留其全部内容，"
-                "只能追加、不能删除或修改已有摘要中的任何内容：\n\n"
-                f"{current_summary}\n\n"
-                "以下是新的对话轮次，请将其中的用户意图、关键结果、"
-                "主要进展、正在进行还未完成的工作、以及上述摘要里未完成当前新轮次里已完成的工作，追加整合到摘要末尾：\n\n"
-                f"{new_turns_text}"
-            )
-        else:
-            prompt = (
-                "请总结以下对话轮次中的用户意图、关键结果和主要进展，要求尽可能简洁但保留核心：\n\n"
-                f"{new_turns_text}"
-            )
+            current_summary = self.session_summary
+            if current_summary:
+                prompt = (
+                    "以下是之前对话的摘要，请严格保留其全部内容，"
+                    "只能追加、不能删除或修改已有摘要中的任何内容：\n\n"
+                    f"{current_summary}\n\n"
+                    "以下是新的对话轮次，请将其中的用户意图、关键结果、"
+                    "主要进展、正在进行还未完成的工作追加整合到摘要末尾：\n\n"
+                    f"{new_turns_text}"
+                )
+            else:
+                prompt = (
+                    "请总结以下对话轮次中的用户意图、关键结果和主要进展，"
+                    "要求尽可能简洁但保留核心：\n\n"
+                    f"{new_turns_text}"
+                )
 
-        try:
-            result = self.summarizer(prompt)
-        except Exception:
-            return  # 后台压缩失败不影响主流程
+            try:
+                result = self.summarizer(prompt)
+            except Exception:
+                return  # 后台压缩失败不影响主流程，pending 保留待下次重试
 
-        if result:
-            self.session_summary = result
+            if result:
+                self.session_summary = result
+                self._pending_compress = [
+                    t for t in self._pending_compress if t not in turns
+                ]
 
     def _do_compact(self) -> None:
-        """二次压缩：对超长的 session_summary 做全量 LLM 压缩。
+        """二次压缩：对超长的 session_summary 做全量 LLM 压缩。"""
+        with self._summary_lock:
+            current = self.session_summary
+            if len(current) <= self.MAX_SESSION_SUMMARY_CHARS:
+                return  # 已被之前的 compact 任务处理过
 
-        读取当前 session_summary，压缩后写回。由于只有本线程写，
-        无需 CAS。
-        """
-        current = self.session_summary
-        if len(current) <= self.MAX_SESSION_SUMMARY_CHARS:
-            return  # 已被之前的 compact 任务处理过，无需重复压缩
-
-        compressed = self._llm_compress(current)
-        if compressed and compressed != current:
-            self.session_summary = compressed
+            compressed = self._llm_compress(current)
+            if compressed and compressed != current:
+                self.session_summary = compressed
 
     def _llm_compress(self, prompt: str) -> str:
-        """通过 summarizer 调用 LLM 压缩文本（全量二次压缩，安全兜底用）。
-        Args:
-            prompt: 待压缩文本
-        Returns:
-            压缩后文本；若 summarizer 不可用或失败则返回原文
-        """
+        """通过 summarizer 调用 LLM 压缩文本（全量二次压缩，安全兜底用）。"""
         if not self.summarizer:
             return prompt
         try:

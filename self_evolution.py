@@ -21,18 +21,10 @@ import concurrent.futures
 import time
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Dict, Any, List
-from enum import Enum
-
-
-class TaskPhase(Enum):
-    PROFILE = "profile"           # 用户画像提取
-    EXPERIENCE = "experience"     # 经验自动提取
-    SKILL = "skill"               # 技能模式检测
 
 
 @dataclass
 class EvolutionTask:
-    phase: TaskPhase
     user_msg: str = ""
     assistant_msg: str = ""
     tools_used: List[str] = field(default_factory=list)  # 本轮用到的工具
@@ -183,7 +175,7 @@ class SelfEvolutionEngine:
     _NEGATIVE_PATTERNS = [
         "不对", "错了", "不是", "有问题", "不满意", "不行", "不要",
         "重新", "改回", "恢复", "不是这样的", "你搞错了",
-        "这不是我想要的", "别", "别这样", "搞什么",
+        "这不是我想要的", "别这样", "搞什么",
     ]
 
     @classmethod

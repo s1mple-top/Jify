@@ -36,7 +36,7 @@ from rich.rule import Rule
 from rich.text import Text
 
 from agent_loop import AgentLoop, AgentConfig
-from self_evolution import SelfEvolutionEngine, EvolutionTask, TaskPhase
+from self_evolution import SelfEvolutionEngine, EvolutionTask
 from model_client import get_model_client
 from agent_p2p import (
     init_p2p, stop_p2p, set_request_handler,
@@ -356,7 +356,6 @@ class JifyCLI:
                                     tools_used.append(tname)
                 final_resp = result.get('final_response', '') if result else ''
                 self.evolution.submit(EvolutionTask(
-                    phase=TaskPhase.PROFILE,
                     user_msg=prompt,
                     assistant_msg=final_resp,
                     tools_used=tools_used,
@@ -468,7 +467,6 @@ class JifyCLI:
 
                 final_resp = result.get('final_response', '') if result else ''
                 self.evolution.submit(EvolutionTask(
-                    phase=TaskPhase.PROFILE,
                     user_msg=user_input,
                     assistant_msg=final_resp,
                     tools_used=tools_used,

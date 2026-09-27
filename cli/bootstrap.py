@@ -40,7 +40,7 @@ DEFAULT_CONFIG_YAML = """\
 
 # 运行时参数
 # 最大Loop轮数
-max_iterations: 100
+max_iterations: 300
 # 工具调用延迟，一般为0最好，不用延迟
 tool_delay: 0.0
 max_workers: 8
