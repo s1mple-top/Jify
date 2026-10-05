@@ -16,6 +16,12 @@ If Jify helps you, please give it a Star — it means a lot.
 https://github.com/user-attachments/assets/68095fbc-9af2-4019-b8d9-512a754b2d6d
 
 
+## Jify 发掘的 CVE 清单 / CVEs Discovered by Jify
+
+| CVE 编号 / CVE ID | 项目 / Project | 说明 / Description                                    |
+| ----------------- | -------------- | ----------------------------------------------------- |
+| CVE-2026-105237   | litemall       | 由 Jify 发掘并验证 / Discovered and validated by Jify |
+
 ## 安装 / Installation
 
 ```bash
@@ -77,41 +83,41 @@ You can run `jify` from any directory to start it.
 在对话中输入 `/` 可触发自动补全：
 Type `/` in a chat to trigger autocompletion:
 
-| 命令 / Command | 说明 / Description |
-|------|------|
-| `/model <name>` | 切换模型 / Switch model |
-| `/resume <id>` | 恢复历史对话 / Resume a history session |
-| `/sessions` | 列出最近对话会话 / List recent sessions |
-| `/clear` | 清除对话历史 / Clear chat history |
-| `/help` | 显示帮助信息 / Show help |
-| `/hook` | 显示已加载的 Hook / Show loaded hooks |
-| `/skill` | 列出可用 Skill / List available skills |
-| `/learn` | 学习当前对话，沉淀为 Skill / Learn from current chat and distill into a Skill |
-| `/jify` | 分析当前工作目录(cwd)下的项目，生成 Jify.md / Analyze the project in cwd and generate Jify.md |
-| `/exit` | 退出程序 / Exit |
+| 命令 / Command  | 说明 / Description                                           |
+| --------------- | ------------------------------------------------------------ |
+| `/model <name>` | 切换模型 / Switch model                                      |
+| `/resume <id>`  | 恢复历史对话 / Resume a history session                      |
+| `/sessions`     | 列出最近对话会话 / List recent sessions                      |
+| `/clear`        | 清除对话历史 / Clear chat history                            |
+| `/help`         | 显示帮助信息 / Show help                                     |
+| `/hook`         | 显示已加载的 Hook / Show loaded hooks                        |
+| `/skill`        | 列出可用 Skill / List available skills                       |
+| `/learn`        | 学习当前对话，沉淀为 Skill / Learn from current chat and distill into a Skill |
+| `/jify`         | 分析当前工作目录(cwd)下的项目，生成 Jify.md / Analyze the project in cwd and generate Jify.md |
+| `/exit`         | 退出程序 / Exit                                              |
 
 ### 命令行参数 / CLI Flags
 
 顶层参数（`jify`）：
 
-| 参数 / Flag | 默认 / Default | 说明 / Description |
-|------|------|------|
-| `-q, --quick <text>` | 无 | 单轮提问，执行完自动退出 / One-shot query, exits after completion |
-| `--think-stream` | 关闭 / off | 流式输出思考内容 / Stream the thinking content |
-| `--no-think-stream` | — | 显式关闭思考流式输出 / Explicitly disable think streaming |
-| `--safe-exec` | 关闭 / off | exec 命令白名单模式，拦截危险命令 / exec allowlist mode, blocks dangerous commands |
-| `--version` | — | 输出版本号后退出 / Print version and exit |
+| 参数 / Flag          | 默认 / Default | 说明 / Description                                           |
+| -------------------- | -------------- | ------------------------------------------------------------ |
+| `-q, --quick <text>` | 无             | 单轮提问，执行完自动退出 / One-shot query, exits after completion |
+| `--think-stream`     | 关闭 / off     | 流式输出思考内容 / Stream the thinking content               |
+| `--no-think-stream`  | —              | 显式关闭思考流式输出 / Explicitly disable think streaming    |
+| `--safe-exec`        | 关闭 / off     | exec 命令白名单模式，拦截危险命令 / exec allowlist mode, blocks dangerous commands |
+| `--version`          | —              | 输出版本号后退出 / Print version and exit                    |
 
 `--think-stream`、`--safe-exec` 默认均为**关闭**。
 `--think-stream` and `--safe-exec` are **off** by default.
 
 子命令 / Subcommands：
 
-| 子命令 / Subcommand | 参数 / Flag | 默认 / Default | 说明 / Description |
-|--------|------|------|------|
-| `gateway` | `--port` | `9090` | 监听端口 / Listening port |
-| `gateway` | `--host` | `127.0.0.1` | 监听地址 / Listening host |
-| `update` | — | — | 拉取最新版本并更新依赖 / Pull latest version and update deps |
+| 子命令 / Subcommand | 参数 / Flag | 默认 / Default | 说明 / Description                                           |
+| ------------------- | ----------- | -------------- | ------------------------------------------------------------ |
+| `gateway`           | `--port`    | `9090`         | 监听端口 / Listening port                                    |
+| `gateway`           | `--host`    | `127.0.0.1`    | 监听地址 / Listening host                                    |
+| `update`            | —           | —              | 拉取最新版本并更新依赖 / Pull latest version and update deps |
 
 
 ### 自进化引擎 / Self-evolving Engine
