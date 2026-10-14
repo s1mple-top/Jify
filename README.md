@@ -18,9 +18,10 @@ https://github.com/user-attachments/assets/68095fbc-9af2-4019-b8d9-512a754b2d6d
 
 ## Jify 发掘的 CVE 清单 / CVEs Discovered by Jify
 
-| CVE 编号 / CVE ID | 项目 / Project | 说明 / Description                                    |
-| ----------------- | -------------- | ----------------------------------------------------- |
-| CVE-2026-105237   | litemall       | 由 Jify 发掘并验证 / Discovered and validated by Jify |
+| CVE 编号 / CVE ID | 项目 / Project | 说明 / Description                                           |
+| ----------------- | -------------- | ------------------------------------------------------------ |
+| CVE-2026-105237   | litemall       | 由 Jify 发掘并验证 / Discovered and validated by Jify        |
+| CVE-2026-108923   | smart-admin    | `/support/config/queryByKey` 接口权限设置不当，可通过 `configKey` 读取 superadmin 密码，导致垂直越权（CWE-284/CWE-266），由 Jify 发掘并验证 / Improper permission on `/support/config/queryByKey` leaks superadmin credentials, leading to vertical privilege escalation (CWE-284/CWE-266), discovered and validated by Jify |
 
 ## 安装 / Installation
 
