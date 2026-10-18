@@ -15,6 +15,16 @@ If Jify helps you, please give it a Star — it means a lot.
 
 https://github.com/user-attachments/assets/68095fbc-9af2-4019-b8d9-512a754b2d6d
 
+> 注意 / Notice
+>
+> Jify 内置了安全相关能力（漏洞挖掘、渗透测试、CTF 等），并使用安全相关的 Prompt 与 Tool。在使用 Claude 系列模型时，可能会触发模型厂商的安全策略而导致请求被拒绝或中断。
+>
+> 建议：更换为 DeepSeek 系列模型，或在 Jify 中注销/移除相关的安全 Tool 与安全 Prompt 后再使用 Claude 系列模型。
+>
+> Jify ships with security-oriented capabilities (vulnerability discovery, penetration testing, CTF, etc.) along with security-related prompts and tools. When using Claude-series models, this may trigger the provider's safety policies and cause requests to be refused or interrupted.
+>
+> Recommendation: switch to a DeepSeek-series model, or unregister/remove the security-related tools and prompts in Jify before using Claude-series models.
+
 
 ## Jify 发掘的 CVE 清单 / CVEs Discovered by Jify
 
