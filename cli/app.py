@@ -205,7 +205,8 @@ P2P_AGENT_NAMES = [
 class JifyCLI:
     """CLI 风格 Jify Agent"""
 
-    def __init__(self, think_stream: bool = False, safe_exec: bool = False) -> None:
+    def __init__(self, think_stream: bool = False, safe_exec: bool = False,
+                 show_think: bool = True) -> None:
         # 设置白名单模式开关
         from tools.builtin.allowlist import set_safe_exec
         set_safe_exec(safe_exec)
@@ -255,7 +256,7 @@ class JifyCLI:
         # AgentLoop
         self.agent = AgentLoop(agent_config=self.config)
         # CLIConsole
-        self.cli_console = CLIConsole(think_stream)
+        self.cli_console = CLIConsole(think_stream, show_think)
 
         # Team Mode: 初始化 TeamOrchestrator（仅注册 leader，不启动 Worker）
         # 传入 callable 延迟解析 client，使 Worker 跟随主 Agent 当前切换的模型/provider
@@ -918,7 +919,8 @@ def _show_trust_prompt(cwd: str) -> bool:
     return result == 0
 
 
-def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
+def main_loop(think_stream: bool = False, safe_exec: bool = False,
+              show_think: bool = True) -> None:
     console.clear()
 
     # 启动风险提示：banner 输出前要求用户确认授权
@@ -928,7 +930,7 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
 
 
     # 初始化 Agent
-    agent_cli = JifyCLI(think_stream, safe_exec)
+    agent_cli = JifyCLI(think_stream, safe_exec, show_think)
     agent_cli.start_mcp_async()
 
     # 注入可用模型名，供 /model 命令 Tab 补全
@@ -1297,11 +1299,12 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False) -> None:
         _hard_exit()
 
 
-def single_turn(user_input: str, think_stream: bool = False, safe_exec: bool = False) -> None:
+def single_turn(user_input: str, think_stream: bool = False, safe_exec: bool = False,
+                show_think: bool = True) -> None:
     """
     单轮快速提问模式（python cli.py -q "你好"）
     """
-    agent_cli = JifyCLI(think_stream, safe_exec)
+    agent_cli = JifyCLI(think_stream, safe_exec, show_think)
 
     console.print()
     meta(f"Jify · {datetime.now().strftime('%H:%M')}")
@@ -1328,8 +1331,8 @@ def main() -> None:
                         help="单轮快速提问，执行完毕后自动退出")
     parser.add_argument("--think-stream", action="store_true", default=False,
                         help="流式输出思考内容；开启后思考内容实时分段显示")
-    parser.add_argument("--no-think-stream", action="store_false", dest="think_stream",
-                        help="关闭思考内容流式输出")
+    parser.add_argument("--no-think", action="store_false", dest="show_think", default=True,
+                        help="不在终端输出模型思考内容，仅显示工具调用与最终回答")
     parser.add_argument("--safe-exec", action="store_true", default=False,
                         help="启用 exec 命令白名单模式，拦截危险命令")
     parser.add_argument("--version", action="store_true", default=False,
@@ -1362,9 +1365,9 @@ def main() -> None:
 
     # 默认 CLI 模式
     if args.quick:
-        single_turn(args.quick, args.think_stream, args.safe_exec)
+        single_turn(args.quick, args.think_stream, args.safe_exec, args.show_think)
     else:
-        main_loop(args.think_stream, args.safe_exec)
+        main_loop(args.think_stream, args.safe_exec, args.show_think)
 
 
 def _run_gateway(args: argparse.Namespace) -> None:

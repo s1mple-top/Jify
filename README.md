@@ -115,7 +115,7 @@ Type `/` in a chat to trigger autocompletion:
 | -------------------- | -------------- | ------------------------------------------------------------ |
 | `-q, --quick <text>` | 无             | 单轮提问，执行完自动退出 / One-shot query, exits after completion |
 | `--think-stream`     | 关闭 / off     | 流式输出思考内容 / Stream the thinking content               |
-| `--no-think-stream`  | —              | 显式关闭思考流式输出 / Explicitly disable think streaming    |
+| `--no-think`         | —              | 不在终端输出模型思考内容，仅显示工具调用与最终回答 / Hide thinking output, keep only tool calls and final answer |
 | `--safe-exec`        | 关闭 / off     | exec 命令白名单模式，拦截危险命令 / exec allowlist mode, blocks dangerous commands |
 | `--version`          | —              | 输出版本号后退出 / Print version and exit                    |
 

@@ -205,6 +205,7 @@ class OutputEngine:
 
         self._think_buffer: str = ""
         self._think_header_emitted: bool = False
+        self._show_thinking: bool = True
 
         self._md_cache: Dict[str, Markdown] = {}
 
@@ -266,6 +267,16 @@ class OutputEngine:
     @think_buffer.setter
     def think_buffer(self, value: str):
         self._think_buffer = value
+
+    @property
+    def show_thinking(self) -> bool:
+        return self._show_thinking
+
+    @show_thinking.setter
+    def show_thinking(self, value: bool):
+        self._show_thinking = value
+        if not value:
+            self._think_buffer = ""
 
     @property
     def phrase(self) -> str:
@@ -896,6 +907,9 @@ class OutputEngine:
 
     def output_thinking(self, flush: bool = False) -> None:
         if not self._think_buffer:
+            return
+        if not self._show_thinking:
+            self._think_buffer = ""
             return
         if not self._think_header_emitted:
             self.queue_output(Text(""))

@@ -27,7 +27,7 @@ class CLIConsole(BaseStreamConsumer):
     _DRAIN_RATIO = 0.2
     _STREAM_STALL_TIMEOUT = 15 #
 
-    def __init__(self, think_stream: bool = False) -> None:
+    def __init__(self, think_stream: bool = False, show_think: bool = True) -> None:
         self.token_num = 0
         self.last_reasoning_content = ""
         self.event_bus = event_bus
@@ -44,6 +44,7 @@ class CLIConsole(BaseStreamConsumer):
         self._think_stream: bool = think_stream
 
         self._output = OutputEngine()
+        self._output.show_thinking = show_think
         self.set_input_active = self._output.set_input_active
 
     def prepare_for_input(self) -> None:
@@ -189,10 +190,11 @@ class CLIConsole(BaseStreamConsumer):
     def _on_thinking(self, text: str) -> None:
         self._output.model_phase = "thinking"
         self.last_reasoning_content += text
-        self._output.think_buffer += text
+        if self._output.show_thinking:
+            self._output.think_buffer += text
         self._token_recv += len(text)
         self._output.update_anim_target(-1, self.total_tokens_recv + self._token_recv)
-        if self._think_stream and len(self._output.think_buffer) >= 120:
+        if self._output.show_thinking and self._think_stream and len(self._output.think_buffer) >= 120:
             self._output.output_thinking(flush=True)
 
     def _on_tool_token(self, text: str) -> None:
