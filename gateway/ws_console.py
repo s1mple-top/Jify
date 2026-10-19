@@ -6,7 +6,7 @@ consume_stream / _fire_tool 骨架继承自 BaseStreamConsumer（stream_consumer
 
 import json as _json
 import queue
-from typing import Optional
+from typing import Dict, Optional
 
 from fastapi import WebSocket
 from stream_consumer import BaseStreamConsumer
@@ -24,6 +24,8 @@ class WebSocketConsole(BaseStreamConsumer):
         self.ws = ws
         self.token_num = 0
         self.last_reasoning_content = ""
+        # Anthropic 扩展思考块（按 content block index 分组），需随 assistant 消息原样回传
+        self._thinking_blocks: Dict[int, Dict] = {}
         self.total_tokens_sent = 0
         self.total_tokens_recv = 0
         self._stream_buffer = ""
@@ -121,15 +123,36 @@ class WebSocketConsole(BaseStreamConsumer):
     # ---- BaseStreamConsumer 钩子实现 ----
 
     def _reset_stream_state(self) -> None:
+        self._thinking_blocks = {}
         self._send({"type": "thinking_start"})
+
+    @property
+    def last_thinking_blocks(self) -> list:
+        """按 content block 顺序返回本轮思考块（供回传给 Anthropic）。"""
+        return [self._thinking_blocks[i] for i in sorted(self._thinking_blocks)]
 
     def _on_content(self, text: str) -> None:
         self.total_tokens_recv += len(text)
         self._send({"type": "text_chunk", "content": text})
 
-    def _on_thinking(self, text: str) -> None:
+    def _on_thinking(self, text: str, index: int = -1) -> None:
         self.last_reasoning_content += text
+        block = self._thinking_blocks.setdefault(
+            index, {"type": "thinking", "thinking": "", "signature": ""}
+        )
+        if block["type"] == "thinking":
+            block["thinking"] += text
         self._send({"type": "thinking", "content": text})
+
+    def _on_thinking_signature(self, signature: str, redacted: str, index: int = -1) -> None:
+        if redacted:
+            self._thinking_blocks[index] = {"type": "redacted_thinking", "data": redacted}
+        elif signature:
+            block = self._thinking_blocks.setdefault(
+                index, {"type": "thinking", "thinking": "", "signature": ""}
+            )
+            if block["type"] == "thinking":
+                block["signature"] = signature
 
     def _prepare_tool_submit(self, tc_id, name, args, args_str, registry):
         self._send({"type": "tool_start", "tool_name": name, "tool_id": tc_id})

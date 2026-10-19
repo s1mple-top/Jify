@@ -16,6 +16,26 @@ import time
 from typing import Any, Dict, Optional
 
 
+def _is_timeout_error(exc: BaseException) -> bool:
+    """判断异常是否表示超时。
+
+    httpx.ReadTimeout / anthropic.APITimeoutError 都不是内置 TimeoutError
+    的子类（httpx 走 TimeoutException，anthropic 走 APIError），因此不能
+    用 isinstance(exc, TimeoutError) 判定。
+    """
+    if isinstance(exc, (TimeoutError,)):
+        return True
+    # 按类名匹配，避免为可选依赖强引入 httpx / anthropic
+    names = {type(exc).__name__}
+    for base in type(exc).__mro__:
+        names.add(base.__name__)
+    if names & {"TimeoutException", "ReadTimeout", "ConnectTimeout",
+                "WriteTimeout", "PoolTimeout", "APITimeoutError"}:
+        return True
+    msg = str(exc).lower()
+    return "timed out" in msg or "timeout" in type(exc).__name__.lower()
+
+
 class BaseStreamConsumer:
     """流式响应消费骨架（模板方法）。
 
@@ -80,7 +100,14 @@ class BaseStreamConsumer:
                     self._on_content(chunk.content)
 
                 if chunk.thinking:
-                    self._on_thinking(chunk.thinking)
+                    self._on_thinking(chunk.thinking, getattr(chunk, "thinking_index", -1))
+
+                if getattr(chunk, "thinking_signature", "") or getattr(chunk, "thinking_redacted", ""):
+                    self._on_thinking_signature(
+                        getattr(chunk, "thinking_signature", "") or "",
+                        getattr(chunk, "thinking_redacted", "") or "",
+                        getattr(chunk, "thinking_index", -1),
+                    )
 
                 if chunk.tool_call_deltas:
                     for tc in chunk.tool_call_deltas:
@@ -197,7 +224,15 @@ class BaseStreamConsumer:
     def _on_content(self, text: str) -> None:
         pass
 
-    def _on_thinking(self, text: str) -> None:
+    def _on_thinking(self, text: str, index: int = -1) -> None:
+        pass
+
+    def _on_thinking_signature(self, signature: str, redacted: str, index: int = -1) -> None:
+        """Anthropic 扩展思考签名 / redacted_thinking 数据（需原样回传）。
+
+        index 为该 thinking 块在 content 中的序号，interleaved thinking 下
+        一轮会有多个块，必须按 index 分别累积。
+        """
         pass
 
     def _on_tool_token(self, text: str) -> None:

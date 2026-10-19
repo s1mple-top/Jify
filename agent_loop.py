@@ -38,6 +38,8 @@ class Message:
     tool_calls: Optional[List[Dict]] = None
     reasoning_content: Optional[str] = None
     tool_call_id: Optional[str] = None
+    # Anthropic 扩展思考块（有序），须随 thinking 块原样回传以支持多轮工具调用
+    thinking_blocks: Optional[List[Dict]] = None
 
 
 @dataclass
@@ -185,12 +187,20 @@ def _get_provider_extra_body(config: "AgentConfig") -> dict:
         extra["thinking"] = {"type":"enabled"}
     if "deepseek.com" in base or model.startswith("deepseek"):
         # DeepSeek 思考档位：服务端默认已开启 high。仅在用户显式配置 reasoning_effort 时，
-        # 按 provider 映射为对应格式（anthropic → reasoning/output_config，openai → thinking/reasoning_effort）。
+        # 按 provider 映射为对应格式（anthropic → thinking(含 budget_tokens)/output_config，
+        # openai → thinking/reasoning_effort）。
         effort = (config.extra_body or {}).get("reasoning_effort")
         if effort:
             if config.provider in ("anthropic", "claude"):
-                extra["thinking"] = {"type": "disabled" if effort == "none" else "enabled"}
-                if effort != "none":
+                if effort == "none":
+                    extra["thinking"] = {"type": "disabled"}
+                else:
+                    # Anthropic 协议要求 budget_tokens 必填且 < max_tokens；
+                    # 这里按档位给初值，最终由 AnthropicClient 依实际 max_tokens 再裁剪。
+                    budget = {"low": 2048, "medium": 4096, "high": 8192}.get(
+                        str(effort).lower(), 4096
+                    )
+                    extra["thinking"] = {"type": "enabled", "budget_tokens": budget}
                     extra["output_config"] = {"effort": effort}
             else:
                 extra["thinking"] = {"type": "disabled" if effort == "none" else "enabled"}
@@ -289,10 +299,13 @@ class AgentLoop:
         for m in self.messages:
             if m.reasoning_content:
                 m.reasoning_content = None
+            # 模型切换后签名不再有效，必须同时清空，否则会被当作非法 thinking 块回传
+            m.thinking_blocks = None
         with self._session_messages_lock:
             for m in self._session_messages:
                 if m.reasoning_content:
                     m.reasoning_content = None
+                m.thinking_blocks = None
 
     # 会话持久化
     def save_conversation(self) -> Optional[str]:
@@ -520,6 +533,7 @@ class AgentLoop:
                     role="assistant",
                     content=text_content or "",
                     reasoning_content=console.last_reasoning_content,
+                    thinking_blocks=console.last_thinking_blocks or None,
                 ))
 
                 # Hook llm_output
@@ -587,6 +601,7 @@ class AgentLoop:
                 role="assistant",
                 content=text_content or "",
                 reasoning_content=console.last_reasoning_content,
+                thinking_blocks=console.last_thinking_blocks or None,
                 tool_calls=tool_calls,
             ))
 
@@ -838,6 +853,10 @@ class AgentLoop:
                 m = {"role": msg.role, "content": msg.content}
                 if msg.reasoning_content:  # 新增
                     m["reasoning_content"] = msg.reasoning_content
+                # thinking 块仅 Anthropic 有意义，其他 provider 收到未知字段会报错
+                if self.config.provider in ("anthropic", "claude"):
+                    if msg.thinking_blocks:
+                        m["thinking_blocks"] = msg.thinking_blocks
                 if msg.tool_calls:
                     m["tool_calls"] = msg.tool_calls
                 if msg.tool_call_id:
@@ -852,7 +871,9 @@ class AgentLoop:
 
             extra_body = self.config.extra_body.copy()
             extra_body.update(_get_provider_extra_body(self.config))
-            if reasoning_content:
+            # reasoning_content 仅对 OpenAI 兼容供应商有意义；Anthropic 请求体没有该字段，
+            # 透传会被当作非法参数拒绝。
+            if reasoning_content and self.config.provider not in ("anthropic", "claude"):
                 extra_body["reasoning_content"] = reasoning_content
 
             # Hook before_api_call

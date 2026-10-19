@@ -34,6 +34,14 @@ class StreamChunk:
     """统一的流式 chunk，适配 OpenAI / Anthropic 原生协议"""
     content: str = ""
     thinking: str = ""
+    # thinking 块在该轮 content 中的序号。Anthropic 的 interleaved thinking
+    # 一轮可能出现多个 thinking 块，必须按 index 分开累积，否则签名会串块。
+    thinking_index: int = -1
+    # Anthropic 扩展思考：signature 必须原样回传，否则多轮工具调用会报
+    # "Expected thinking or redacted_thinking block"
+    thinking_signature: str = ""
+    # redacted_thinking block 的 data（不可解密，原样回传）
+    thinking_redacted: str = ""
     tool_call_deltas: List[ToolCallDelta] = field(default_factory=list)
     finish_reason: str = ""
 
@@ -43,20 +51,74 @@ class UnifiedResponse:
     统一的非流式响应。
 
     tool_calls 格式：[{"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}]
+    thinking_blocks 格式：[{"type": "thinking", "thinking": "...", "signature": "..."} |
+                          {"type": "redacted_thinking", "data": "..."}]
     """
     def __init__(self, content="", thinking="", tool_calls=None, model=""):
         self.content = content
         self.thinking = thinking
+        self.thinking_blocks: List[Dict] = []
         self.tool_calls = tool_calls or []
         self.model = model
 
 
+# 流式重连辅助
+def _chunk_has_payload(sc: "StreamChunk") -> bool:
+    """判断 chunk 是否携带了会展示给用户/影响下游的内容。"""
+    return bool(
+        sc.content
+        or sc.thinking
+        or sc.tool_call_deltas
+        or sc.finish_reason
+        or getattr(sc, "thinking_signature", "")
+        or getattr(sc, "thinking_redacted", "")
+    )
+
+
+class _RetryableStreamMixin:
+    """流式迭代中断重连。
+
+    只在**尚未产出任何内容**时重连：此时重放请求不会造成重复输出。
+    一旦已经 yield 过内容（正文/思考/工具参数），中断只能向上抛——
+    重放会重复输出，语义上不可自动恢复。
+    """
+
+    def _init_retry(self, reopen, max_attempts: int) -> None:
+        self._reopen = reopen
+        self._max_attempts = max(1, int(max_attempts or 1))
+        self._attempt = 1
+        self._emitted = False
+
+    def _mark_emitted(self, sc: "StreamChunk") -> None:
+        if not self._emitted and _chunk_has_payload(sc):
+            self._emitted = True
+
+    def _reopen_stream(self, exc: Exception) -> bool:
+        """判断并执行重连。返回 True 表示已换上新流，应继续迭代。"""
+        if self._reopen is None or self._emitted:
+            return False
+        if self._attempt >= self._max_attempts:
+            return False
+        if not _is_transient(exc):
+            return False
+        self._attempt += 1
+        wait = 0.5 + random.uniform(0, 0.5)
+        logger.warning(
+            "stream interrupted before any output (%s), reconnecting %d/%d in %.1fs",
+            type(exc).__name__, self._attempt, self._max_attempts, wait,
+        )
+        time.sleep(wait)
+        self._stream = self._reopen()
+        return True
+
+
 # 流式适配器
-class OpenAIStreamAdapter:
+class OpenAIStreamAdapter(_RetryableStreamMixin):
     """把 OpenAI stream chunks 转为统一的 StreamChunk 迭代器"""
 
-    def __init__(self, openai_stream: Iterator):
+    def __init__(self, openai_stream: Iterator, reopen=None, max_attempts: int = 3):
         self._stream = openai_stream
+        self._init_retry(reopen, max_attempts)
 
     def __iter__(self):
         return self._next()
@@ -69,6 +131,16 @@ class OpenAIStreamAdapter:
             pass
 
     def _next(self):
+        """迭代 chunk 流；尚未产出内容时的瞬时中断会自动重连。"""
+        while True:
+            try:
+                yield from self._iter_once()
+                return
+            except Exception as exc:
+                if not self._reopen_stream(exc):
+                    raise
+
+    def _iter_once(self):
         for chunk in self._stream:
             sc = StreamChunk()
 
@@ -104,14 +176,29 @@ class OpenAIStreamAdapter:
             if hasattr(chunk.choices[0], "finish_reason") and chunk.choices[0].finish_reason:
                 sc.finish_reason = chunk.choices[0].finish_reason
 
+            self._mark_emitted(sc)
             yield sc
 
 
-class AnthropicStreamAdapter:
-    """把 Anthropic SSE 事件流转为统一的 StreamChunk 迭代器"""
+# Anthropic stop_reason → OpenAI 风格 finish_reason。
+# pause_turn / refusal 无对等值：refusal 映射为 content_filter，
+# pause_turn 原样保留（表示可回传继续，不应被当作正常结束）。
+_STOP_REASON_MAP = {
+    "end_turn": "stop",
+    "tool_use": "tool_calls",
+    "max_tokens": "length",
+    "stop_sequence": "stop",
+    "refusal": "content_filter",
+    "pause_turn": "pause_turn",
+}
 
-    def __init__(self, anthropic_stream: Iterator):
+
+class AnthropicStreamAdapter(_RetryableStreamMixin):
+    """把 Anthropic SSE 事件流转换为统一的 StreamChunk 迭代器"""
+
+    def __init__(self, anthropic_stream: Iterator, reopen=None, max_attempts: int = 3):
         self._stream = anthropic_stream
+        self._init_retry(reopen, max_attempts)
 
     def __iter__(self):
         return self._next()
@@ -124,9 +211,26 @@ class AnthropicStreamAdapter:
             pass
 
     def _next(self):
+        """迭代 SSE 事件流；尚未产出内容时的瞬时中断会自动重连。"""
+        while True:
+            try:
+                yield from self._iter_once()
+                return
+            except Exception as exc:
+                if not self._reopen_stream(exc):
+                    raise
+
+    def _iter_once(self):
         for event in self._stream:
             sc = StreamChunk()
             event_type = getattr(event, "type", "")
+            if not event_type and isinstance(event, dict):
+                event_type = event.get("type", "")
+
+            if event_type == "error":
+                # 服务端在流中途下发的错误（overloaded_error 等）必须向上抛，
+                # 否则会被当作空 chunk 吞掉，上层误以为正常结束。
+                raise _parse_stream_error_event(event)
 
             if event_type == "content_block_start":
                 cb = getattr(event, "content_block", None)
@@ -140,6 +244,10 @@ class AnthropicStreamAdapter:
                     ))
                 elif cb and getattr(cb, "type", "") == "thinking":
                     sc.thinking = getattr(cb, "thinking", "") or ""
+                    sc.thinking_index = getattr(event, "index", -1)
+                elif cb and getattr(cb, "type", "") == "redacted_thinking":
+                    sc.thinking_redacted = getattr(cb, "data", "") or ""
+                    sc.thinking_index = getattr(event, "index", -1)
 
             elif event_type == "content_block_delta":
                 delta = getattr(event, "delta", None)
@@ -154,23 +262,72 @@ class AnthropicStreamAdapter:
                         ))
                     elif dt == "thinking_delta":
                         sc.thinking = getattr(delta, "thinking", "") or ""
+                        sc.thinking_index = getattr(event, "index", -1)
                     elif dt == "signature_delta":
-                        pass
+                        sc.thinking_signature = getattr(delta, "signature", "") or ""
+                        sc.thinking_index = getattr(event, "index", -1)
 
             elif event_type == "message_delta":
                 delta = getattr(event, "delta", None)
-                if delta:
-                    stop = getattr(delta, "stop_reason", "") or ""
-                    stop_map = {
-                        "end_turn": "stop",
-                        "tool_use": "tool_calls",
-                        "max_tokens": "length",
-                        "stop_sequence": "stop",
-                    }
-                    sc.finish_reason = stop_map.get(stop, "stop")
+                if delta is None and isinstance(event, dict):
+                    delta = event.get("delta")
+                if delta is not None:
+                    stop = (getattr(delta, "stop_reason", None)
+                            if not isinstance(delta, dict)
+                            else delta.get("stop_reason")) or ""
+                    if stop:
+                        # 未知值原样透传，不猜测为 "stop" 以免误报正常结束
+                        sc.finish_reason = _STOP_REASON_MAP.get(stop, stop)
 
+            self._mark_emitted(sc)
             yield sc
 
+
+
+class AnthropicStreamError(Exception):
+    """Anthropic SSE 流中途下发的 error 事件（HTTP 200 之后的服务端错误）。
+
+    SDK 只在 ``event: error`` 时抛错；部分网关会把它写成普通 data 消息，
+    此时由适配器自行识别，避免被当成空 chunk 静默吞掉。
+    """
+
+    def __init__(self, error_type: str, message: str, retryable: bool = False):
+        self.error_type = error_type
+        self.retryable = retryable
+        super().__init__(f"Anthropic stream error [{error_type}]: {message}")
+
+
+# 可重试的服务端错误（限流 / 过载 / 网关超时 / 内部错误）
+_STREAM_RETRYABLE_ERRORS = {
+    "rate_limit_error",
+    "overloaded_error",
+    "api_error",
+    "gateway_timeout_error",
+    "timeout_error",
+}
+
+
+def _parse_stream_error_event(event) -> AnthropicStreamError:
+    """从 error 事件中解析出错误类型与消息。"""
+    err = getattr(event, "error", None)
+    if err is None and isinstance(event, dict):
+        err = event.get("error")
+
+    if isinstance(err, dict):
+        etype = str(err.get("type") or "unknown_error")
+        emsg = str(err.get("message") or err)
+    elif err is not None:
+        etype = str(getattr(err, "type", "") or "unknown_error")
+        emsg = str(getattr(err, "message", "") or err)
+    else:
+        etype = "unknown_error"
+        emsg = str(event)
+
+    return AnthropicStreamError(
+        etype,
+        emsg,
+        retryable=etype in _STREAM_RETRYABLE_ERRORS,
+    )
 
 
 def _make_cache_key(provider: str, api_key: str, base_url: str) -> str:
@@ -198,6 +355,9 @@ _RETRYABLE_PATTERNS = (
 
 def _is_transient(exc: Exception) -> bool:
     """判断异常是否为瞬时错误（值得重试）。"""
+    if isinstance(exc, AnthropicStreamError):
+        # 服务端在流中下发的错误自带可重试判定
+        return exc.retryable
     exc_name = type(exc).__name__
     for name in _RETRYABLE_PATTERNS:
         if name in exc_name or name in str(type(exc)):
@@ -333,7 +493,14 @@ class OpenAIClient:
                 timeout_seq=_timeout_seq,
             )
             if extra.get("stream"):
-                return OpenAIStreamAdapter(raw)
+                # 迭代中若在产出任何内容前中断，用同一组参数重开流
+                return OpenAIStreamAdapter(
+                    raw,
+                    reopen=lambda: openai.ChatCompletion.create(
+                        **params, request_timeout=_timeout_seq[0]
+                    ),
+                    max_attempts=3,
+                )
             return _openai_raw_to_unified(raw)
         else:
             chat_kwargs = {"model": model, "messages": messages, **extra}
@@ -346,7 +513,14 @@ class OpenAIClient:
                 timeout_seq=_timeout_seq,
             )
             if extra.get("stream"):
-                return OpenAIStreamAdapter(raw)
+                # 迭代中若在产出任何内容前中断，用同一组参数重开流
+                return OpenAIStreamAdapter(
+                    raw,
+                    reopen=lambda: self._client_v1.chat.completions.create(
+                        **chat_kwargs, timeout=_timeout_seq[0]
+                    ),
+                    max_attempts=3,
+                )
             return _openai_raw_to_unified(raw)
 
 
@@ -404,23 +578,55 @@ class AnthropicClient:
         - 非流式：返回 UnifiedResponse
         - 流式 (stream=True)：返回 AnthropicStreamAdapter，迭代产出 StreamChunk
         """
-        system_content = ""
+        system_parts: List[Dict] = []
         filtered_messages = []
         for msg in messages:
-            if msg.get("role") == "system":
-                system_content = msg.get("content", "")
-            else:
+            if msg.get("role") != "system":
                 filtered_messages.append(msg)
+                continue
+            # 多条 system 按顺序合并；content 可能是字符串或 block 数组
+            # （block 数组用于 cache_control，必须原样保留）
+            c = msg.get("content")
+            if isinstance(c, str):
+                if c.strip():
+                    system_parts.append({"type": "text", "text": c})
+            elif isinstance(c, list):
+                for b in c:
+                    if isinstance(b, str):
+                        if b.strip():
+                            system_parts.append({"type": "text", "text": b})
+                    elif isinstance(b, dict) and b.get("type") == "text":
+                        if (b.get("text") or "").strip():
+                            system_parts.append(b)
+
+        # max_tokens 收敛到模型上限：超限会被 Anthropic 直接 400
+        max_tokens = _normalize_max_tokens(model, kwargs.get("max_tokens"))
+
+        # thinking 是 Messages API 的顶层参数：从 extra_body 中提取后交给 SDK 序列化，
+        # 同时规范化 budget_tokens（Anthropic 要求必填且 1024 <= budget < max_tokens）。
+        extra_body = kwargs.get("extra_body")
+        extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
+        thinking_cfg = None
+        raw_thinking = extra_body.pop("thinking", None)
+        if isinstance(raw_thinking, dict):
+            thinking_cfg = _normalize_thinking(raw_thinking, max_tokens)
+        thinking_enabled = thinking_cfg is not None and thinking_cfg.get("type") == "enabled"
 
         anthropic_messages = []
         _pending_tool_results = []
         for msg in filtered_messages:
             role = msg.get("role")
             if role == "tool":
+                tool_use_id = msg.get("tool_call_id") or ""
+                if not tool_use_id:
+                    # Anthropic 要求 tool_result 必须带 tool_use_id，缺失会被 400 拒绝
+                    logger.warning("drop tool message without tool_call_id")
+                    continue
                 _pending_tool_results.append({
                     "type": "tool_result",
-                    "tool_use_id": msg.get("tool_call_id", ""),
+                    "tool_use_id": tool_use_id,
                     "content": msg.get("content", ""),
+                    "is_error": bool(msg.get("is_error", False)),
                 })
             else:
                 if _pending_tool_results:
@@ -429,12 +635,16 @@ class AnthropicClient:
                         "content": _pending_tool_results,
                     })
                     _pending_tool_results = []
-                if role == "assistant" and msg.get("tool_calls"):
-                    anthropic_messages.append(
-                        _assistant_to_anthropic(msg)
-                    )
+                if role == "assistant":
+                    converted = _assistant_to_anthropic(msg, thinking_enabled=thinking_enabled)
+                    if converted is not None:
+                        anthropic_messages.append(converted)
                 else:
-                    anthropic_messages.append(msg)
+                    # 只保留 role/content，丢弃 reasoning_content、tool_call_id 等
+                    # OpenAI/内部私有字段（SDK 对未知字段原样透传，Anthropic 会 400）
+                    sanitized = _sanitize_anthropic_message(msg)
+                    if sanitized is not None:
+                        anthropic_messages.append(sanitized)
         if _pending_tool_results:
             anthropic_messages.append({
                 "role": "user",
@@ -444,26 +654,41 @@ class AnthropicClient:
         create_kwargs = {
             "model": model,
             "messages": anthropic_messages,
-            "max_tokens": kwargs.get("max_tokens", 20480),
+            "max_tokens": max_tokens,
         }
-        if system_content:
-            create_kwargs["system"] = system_content
+        if system_parts:
+            # 单段且无 cache_control 时用字符串，其余用 block 数组
+            if len(system_parts) == 1 and "cache_control" not in system_parts[0]:
+                create_kwargs["system"] = system_parts[0]["text"]
+            else:
+                create_kwargs["system"] = system_parts
         if tool_schemas:
             create_kwargs["tools"] = _openai_tools_to_anthropic(tool_schemas)
+
+        if thinking_cfg is not None:
+            create_kwargs["thinking"] = thinking_cfg
+
+        # 开启 thinking 时 Anthropic 只接受默认采样参数，传非默认值会 400
         for k in ("temperature", "top_p"):
-            if k in kwargs:
-                create_kwargs[k] = kwargs[k]
+            if k not in kwargs:
+                continue
+            if thinking_enabled:
+                if k == "temperature" and kwargs[k] != 1:
+                    logger.debug("drop temperature=%s because thinking is enabled", kwargs[k])
+                elif k == "temperature":
+                    create_kwargs[k] = 1
+                else:
+                    logger.debug("drop top_p=%s because thinking is enabled", kwargs[k])
+                continue
+            create_kwargs[k] = kwargs[k]
 
         is_stream = kwargs.get("stream", False)
         if is_stream:
             create_kwargs["stream"] = True
 
-        # 透传 extra_body（如 DeepSeek 的 reasoning/output_config 等扩展参数）。
+        # 透传剩余 extra_body（如 DeepSeek 的 output_config 等扩展参数）。
         # 必须通过 SDK 的 extra_body 参数传给请求体，不能展开成顶层 kwarg，
         # 否则 reasoning_effort 等扩展字段会被当作 create() 的非法关键字参数。
-        extra_body = kwargs.get("extra_body")
-        if not isinstance(extra_body, dict):
-            extra_body = {}
 
         _timeout_seq = [10.0] * 5 + [15.0] * 5
         raw = _retry(
@@ -473,8 +698,118 @@ class AnthropicClient:
         )
 
         if is_stream:
-            return AnthropicStreamAdapter(raw)
+            # 迭代中若在产出任何内容前中断，用同一组参数重开流
+            return AnthropicStreamAdapter(
+                raw,
+                reopen=lambda: self._client.messages.create(
+                    **create_kwargs, extra_body=extra_body, timeout=_timeout_seq[0]
+                ),
+                max_attempts=3,
+            )
         return _anthropic_raw_to_unified(raw)
+
+
+# 各模型族的输出 token 上限。Anthropic 对超过上限的 max_tokens 直接 400，
+# 因此这里统一做 min(请求值, 上限) 收敛。
+_MODEL_MAX_OUTPUT = (
+    # 长前缀优先匹配
+    ("claude-opus-4", 32000),
+    ("claude-sonnet-4", 64000),
+    ("claude-haiku-4", 32000),
+    ("claude-3-7-sonnet", 64000),
+    ("claude-3-5-sonnet", 8192),
+    ("claude-3-5-haiku", 8192),
+    ("claude-3-opus", 4096),
+    ("claude-3-sonnet", 4096),
+    ("claude-3-haiku", 4096),
+)
+# 未知模型取保守值，避免撞上 4k 上限的旧模型
+_DEFAULT_MAX_OUTPUT = 8192
+
+
+def _model_max_output(model: str) -> int:
+    """按模型名解析最大输出 token 数。"""
+    name = (model or "").lower()
+    for prefix, limit in _MODEL_MAX_OUTPUT:
+        if name.startswith(prefix):
+            return limit
+    return _DEFAULT_MAX_OUTPUT
+
+
+def _normalize_max_tokens(model: str, requested) -> int:
+    """把 max_tokens 收敛到模型上限内。"""
+    limit = _model_max_output(model)
+    if not isinstance(requested, int) or requested <= 0:
+        return limit
+    if requested > limit:
+        logger.debug(
+            "clamp max_tokens %s -> %s for model %s", requested, limit, model
+        )
+        return limit
+    return requested
+
+
+def _normalize_thinking(cfg: Dict, max_tokens: int) -> Optional[Dict]:
+    """规范化 thinking 配置。
+
+    Anthropic 硬性约束：
+    - type=enabled 时 budget_tokens 必填
+    - 1024 <= budget_tokens < max_tokens
+    不满足时补默认值；max_tokens 过小以致无法满足下限则放弃开启
+    （返回 None），避免必然 400 的请求。
+    """
+    merged = dict(cfg)
+    ttype = (merged.get("type") or "").lower()
+    if ttype != "enabled":
+        return merged or None
+
+    try:
+        max_tokens = int(max_tokens)
+    except (TypeError, ValueError):
+        max_tokens = 20480
+
+    budget = merged.get("budget_tokens")
+    if not isinstance(budget, int) or budget <= 0:
+        budget = 4096
+
+    # budget 必须严格小于 max_tokens，且不低于 1024
+    upper = max_tokens - 1
+    if upper < 1024:
+        logger.warning(
+            "thinking disabled: max_tokens=%s is too small (need > 1024) for budget_tokens",
+            max_tokens,
+        )
+        return None
+    budget = max(1024, min(budget, upper))
+    merged["budget_tokens"] = budget
+    return merged
+
+
+def _sanitize_anthropic_message(msg: Dict) -> Optional[Dict]:
+    """把内部/OpenAI 风格消息裁剪为 Anthropic 合法结构。
+
+    只保留 role 与 content，避免 reasoning_content / tool_calls / tool_call_id
+    等私有字段被 SDK 原样透传进请求体（Anthropic 对未知字段返回 400）。
+    空内容消息（Anthropic 会以 text block 不能为空拒绝）直接丢弃。
+    """
+    role = msg.get("role")
+    if role not in ("user", "assistant"):
+        return None
+
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        if not content.strip():
+            return None
+        return {"role": role, "content": [{"type": "text", "text": content}]}
+    if isinstance(content, list):
+        blocks = [
+            b for b in content
+            if isinstance(b, dict) and b.get("type")
+        ]
+        if not blocks:
+            return None
+        return {"role": role, "content": blocks}
+    return None
 
 
 def _openai_tools_to_anthropic(tool_schemas: List[Dict]) -> List[Dict]:
@@ -491,11 +826,66 @@ def _openai_tools_to_anthropic(tool_schemas: List[Dict]) -> List[Dict]:
     return result
 
 
-def _assistant_to_anthropic(msg: Dict) -> Dict:
-    """把 OpenAI 格式的 assistant 消息转为 Anthropic content block 格式"""
+def _thinking_blocks_to_anthropic(msg: Dict) -> List[Dict]:
+    """把消息里的 thinking 块列表转为 Anthropic content block。
+
+    支持 interleaved thinking（一轮多个 thinking 块）：
+    - thinking_blocks 为有序列表，逐块原样回传
+    - 缺 signature 的 thinking 块会被 Anthropic 判为非法，跳过不传
+    兼容旧字段 thinking_signature / thinking_redacted（单块）。
+    """
+    raw_blocks = msg.get("thinking_blocks") or []
+    if not raw_blocks:
+        # 兼容旧形态
+        redacted = msg.get("thinking_redacted") or ""
+        signature = msg.get("thinking_signature") or ""
+        reasoning = msg.get("reasoning_content")
+        if redacted:
+            raw_blocks = [{"type": "redacted_thinking", "data": redacted}]
+        elif signature and reasoning is not None:
+            raw_blocks = [{
+                "type": "thinking",
+                "thinking": reasoning,
+                "signature": signature,
+            }]
+        else:
+            raw_blocks = []
+
+    result = []
+    for b in raw_blocks:
+        if not isinstance(b, dict):
+            continue
+        btype = b.get("type")
+        if btype == "redacted_thinking":
+            data = b.get("data") or ""
+            if data:
+                result.append({"type": "redacted_thinking", "data": data})
+        elif btype == "thinking":
+            signature = b.get("signature") or ""
+            text = b.get("thinking")
+            if signature and text is not None:
+                result.append({
+                    "type": "thinking",
+                    "thinking": text,
+                    "signature": signature,
+                })
+    return result
+
+
+def _assistant_to_anthropic(msg: Dict, thinking_enabled: bool = False) -> Optional[Dict]:
+    """把内部/OpenAI 格式的 assistant 消息转为 Anthropic content block 格式。
+
+    开启扩展思考时，thinking / redacted_thinking block 必须原样置顶回传，
+    否则带 tool_use 的历史会在下一轮被 Anthropic 以
+    "Expected thinking or redacted_thinking block" 拒绝。
+    """
     content = msg.get("content", "") or ""
     tool_calls = msg.get("tool_calls") or []
     blocks = []
+
+    if thinking_enabled:
+        blocks.extend(_thinking_blocks_to_anthropic(msg))
+
     if content:
         blocks.append({"type": "text", "text": content})
     for tc in tool_calls:
@@ -511,6 +901,8 @@ def _assistant_to_anthropic(msg: Dict) -> Dict:
             "name": fn.get("name", ""),
             "input": args,
         })
+    if not blocks:
+        return None
     return {"role": "assistant", "content": blocks}
 
 
@@ -550,6 +942,7 @@ def _anthropic_raw_to_unified(raw) -> UnifiedResponse:
     content_parts = []
     tool_calls = []
     thinking = ""
+    thinking_blocks: List[Dict] = []
     for block in getattr(raw, "content", []) or []:
         t = getattr(block, "type", "")
         if t == "text":
@@ -565,13 +958,26 @@ def _anthropic_raw_to_unified(raw) -> UnifiedResponse:
                 },
             })
         elif t == "thinking":
-            thinking = getattr(block, "thinking", "") or ""
-    return UnifiedResponse(
+            text = getattr(block, "thinking", "") or ""
+            thinking += text
+            thinking_blocks.append({
+                "type": "thinking",
+                "thinking": text,
+                "signature": getattr(block, "signature", "") or "",
+            })
+        elif t == "redacted_thinking":
+            thinking_blocks.append({
+                "type": "redacted_thinking",
+                "data": getattr(block, "data", "") or "",
+            })
+    resp = UnifiedResponse(
         content="\n".join(content_parts),
         thinking=thinking,
         tool_calls=tool_calls,
         model=getattr(raw, "model", ""),
     )
+    resp.thinking_blocks = thinking_blocks
+    return resp
 
 
 

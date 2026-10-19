@@ -14,7 +14,7 @@ from rich.text import Text
 from agent_p2p import set_p2p_busy
 from event_bus import event_bus
 from output_engine import OutputEngine, JifyTheme
-from stream_consumer import BaseStreamConsumer
+from stream_consumer import BaseStreamConsumer, _is_timeout_error
 
 console = JifyTheme.create_console()
 
@@ -30,6 +30,8 @@ class CLIConsole(BaseStreamConsumer):
     def __init__(self, think_stream: bool = False, show_think: bool = True) -> None:
         self.token_num = 0
         self.last_reasoning_content = ""
+        # Anthropic 扩展思考块（按 content block index 分组），需随 assistant 消息原样回传
+        self._thinking_blocks: Dict[int, Dict] = {}
         self.event_bus = event_bus
         self.total_tokens_sent = 0
         self.total_tokens_recv = 0
@@ -175,6 +177,13 @@ class CLIConsole(BaseStreamConsumer):
             self.total_tokens_recv,
             self._token_sent_target
         )
+        # 每轮流开始必须清空思考块，避免上一轮残留误绑到本轮 assistant 消息
+        self._thinking_blocks = {}
+
+    @property
+    def last_thinking_blocks(self) -> list:
+        """按 content block 顺序返回本轮思考块（供回传给 Anthropic）。"""
+        return [self._thinking_blocks[i] for i in sorted(self._thinking_blocks)]
 
     def _stall_timeout(self) -> Optional[float]:
         return self._STREAM_STALL_TIMEOUT
@@ -187,15 +196,31 @@ class CLIConsole(BaseStreamConsumer):
         self._output.stream_buffer += text
         self._output.update_anim_target(-1, self.total_tokens_recv + self._token_recv)
 
-    def _on_thinking(self, text: str) -> None:
+    def _on_thinking(self, text: str, index: int = -1) -> None:
         self._output.model_phase = "thinking"
         self.last_reasoning_content += text
+        block = self._thinking_blocks.setdefault(
+            index, {"type": "thinking", "thinking": "", "signature": ""}
+        )
+        if block["type"] == "thinking":
+            block["thinking"] += text
         if self._output.show_thinking:
             self._output.think_buffer += text
         self._token_recv += len(text)
         self._output.update_anim_target(-1, self.total_tokens_recv + self._token_recv)
         if self._output.show_thinking and self._think_stream and len(self._output.think_buffer) >= 120:
             self._output.output_thinking(flush=True)
+
+    def _on_thinking_signature(self, signature: str, redacted: str, index: int = -1) -> None:
+        # 同一 index 内可能先有 thinking_delta 再有 signature_delta
+        if redacted:
+            self._thinking_blocks[index] = {"type": "redacted_thinking", "data": redacted}
+        elif signature:
+            block = self._thinking_blocks.setdefault(
+                index, {"type": "thinking", "thinking": "", "signature": ""}
+            )
+            if block["type"] == "thinking":
+                block["signature"] = signature
 
     def _on_tool_token(self, text: str) -> None:
         self._token_recv += len(text)
@@ -216,7 +241,7 @@ class CLIConsole(BaseStreamConsumer):
         # ESC 中断导致的流关闭，不是真实错误，不打印错误消息
         if interrupt_event is not None and interrupt_event.is_set():
             self._output.stream_buffer = ""
-        elif isinstance(e, TimeoutError):
+        elif _is_timeout_error(e):
             self._output.queue_output(Text(
                 f"⚠ 流式响应停滞：{self._STREAM_STALL_TIMEOUT}s 未收到数据。\n"
                 "   API 服务端可能已静默断开连接。\n"
