@@ -359,6 +359,14 @@ body {
   color: #8b7355; font-size: 12px; text-align: center;
   margin: 0 auto; max-width: 80%;
 }
+/* 单行 API 错误提示：小号红字，不要气泡 */
+.msg-error {
+  padding: 2px 4px;
+}
+.msg-error .err-line {
+  color: #dc2626; font-size: 12px; line-height: 1.5;
+  word-break: break-word;
+}
 
 /* Content styles */
 .msg-assistant .bubble .content { white-space: normal; }
@@ -1419,7 +1427,10 @@ body {
         if (data.phase === 'idle') running = false;
         break;
       case 'error':
-        addSystem('&#9888; ' + (data.content || 'Unknown error'));
+        addMsg(
+          '<div class="err-line">&#9888; ' + esc(data.content || 'Unknown error') + '</div>',
+          'msg-error'
+        );
         break;
       case 'todo_update':
         renderTodo(data.todos);

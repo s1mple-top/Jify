@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 from context_manager import ContextManager
 
-from model_client import get_model_client
+from model_client import get_model_client, format_api_error
 from jify_tool import registry, ToolCall, should_parallel, _MAX_WORKERS
 from tools.registry import set_agent_config, reset_agent_config
 from event_bus import event_bus, UIEvent
@@ -494,7 +494,8 @@ class AgentLoop:
             try:
                 response = self._call_model(self.messages, tool_schemas, console.last_reasoning_content)
             except Exception as e:
-                logger.exception("API call failed at iteration %d", self.iteration_count)
+                # 完整堆栈只在 debug 级别留档，默认只给一行友好提示
+                logger.debug("API call failed at iteration %d", self.iteration_count, exc_info=True)
                 # 紧急压缩：上下文溢出 + 未尝试过 → 压缩一次后重试
                 # 不再要求「无旁路摘要」：摘要存在≠足够小，若已有摘要但上下文
                 # 仍溢出（如当前轮自身超限、摘要自身膨胀），同样需要兜底一次。
@@ -507,8 +508,14 @@ class AgentLoop:
                     continue
                 self._last_api_error = str(e)
                 tool_calls = []
-                text_content = f"[API 调用失败] {e}\n请检查网络连接或 API 配置后重试。"
-                event_bus.put(UIEvent("MESSAGE", text_content))
+                friendly = format_api_error(e)
+                text_content = friendly
+                # 单行红色提示：CLI 直接打印，WebUI 走 error 消息
+                try:
+                    console.report_api_error(friendly)
+                except Exception:
+                    pass
+                event_bus.put(UIEvent("ERROR", friendly))
                 break
 
             # event_bus.put(UIEvent("THINK_START","Jify Think ..."))

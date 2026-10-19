@@ -56,6 +56,10 @@ class WebSocketConsole(BaseStreamConsumer):
     def _send(self, msg: dict):
         self._outgoing.put(msg)
 
+    def report_api_error(self, message: str) -> None:
+        """单行错误提示，前端按小号红字渲染。"""
+        self._send({"type": "error", "content": message})
+
     def drain_events(self):
         """优雅地清空 event_bus 里的内容，防止上一会话事件泄漏到下一会话。"""
         while True:

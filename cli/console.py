@@ -235,6 +235,12 @@ class CLIConsole(BaseStreamConsumer):
             self.total_tokens_recv + self._token_recv
         )
 
+    def report_api_error(self, message: str) -> None:
+        """单行红色错误提示，避免整段 traceback 刷屏。"""
+        self._output.queue_output(
+            Text(f"⚠ {message}", style=JifyTheme.RED, no_wrap=False)
+        )
+
     def _handle_stream_error(self, e: Exception, interrupt_event=None) -> None:
         error_msg = str(e)
 

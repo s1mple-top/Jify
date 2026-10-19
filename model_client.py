@@ -353,8 +353,74 @@ _RETRYABLE_PATTERNS = (
 )
 
 
+_QUOTA_PATTERNS = (
+    "insufficient_quota",
+    "insufficient_balance",
+    "insufficientbalance",
+    "quota_exceeded",
+    "quotaexceeded",
+    "allocationquota",
+    "freetieronly",
+    "arrearage",
+    "overdue",
+    "billing",
+    "credit balance",
+    "balance is low",
+    "exceeded your current quota",
+    "余额不足",
+    "额度不足",
+    "额度已用尽",
+    "欠费",
+)
+
+
+def _exception_texts(exc: Exception) -> List[str]:
+    """收集异常自身及 body 中可用于关键词匹配的文本。"""
+    texts = [str(exc)]
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        def _walk(node):
+            if isinstance(node, dict):
+                for value in node.values():
+                    _walk(value)
+            elif isinstance(node, (list, tuple)):
+                for value in node:
+                    _walk(value)
+            elif isinstance(node, str):
+                texts.append(node)
+        _walk(body)
+    elif isinstance(body, str):
+        texts.append(body)
+    return texts
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    """判断是否为余额/额度耗尽类错误（不可重试）。
+
+    各家状态码不统一：OpenAI 用 429 insufficient_quota，DeepSeek 用 402，
+    阿里云百炼多为 400/403 且错误码形如 Arrearage / AllocationQuotaExceeded，
+    因此只能综合状态码、错误码和消息关键词判断。
+    """
+    status = _extract_http_status(exc)
+    if status == 402:  # Payment Required，语义明确
+        return True
+    blob = " ".join(_exception_texts(exc)).lower()
+    if any(p in blob for p in _QUOTA_PATTERNS):
+        return True
+    code = _extract_error_code(exc).lower()
+    if code and any(p in code for p in _QUOTA_PATTERNS):
+        return True
+    cause = exc.__cause__ or exc.__context__
+    if cause is not None and cause is not exc:
+        return _is_quota_error(cause)
+    return False
+
+
 def _is_transient(exc: Exception) -> bool:
     """判断异常是否为瞬时错误（值得重试）。"""
+    # 余额/额度问题重试无意义，直接排除（优先于流错误自带的可重试判定）
+    if _is_quota_error(exc):
+        return False
     if isinstance(exc, AnthropicStreamError):
         # 服务端在流中下发的错误自带可重试判定
         return exc.retryable
@@ -368,6 +434,80 @@ def _is_transient(exc: Exception) -> bool:
     if exc.__context__ is not None and exc.__context__ is not exc:
         return _is_transient(exc.__context__)
     return False
+
+
+_ERROR_HINTS = {
+    401: "API Key 无效或已过期，请检查配置",
+    403: "无访问权限，或该模型未开通",
+    404: "接口地址或模型名不存在，请检查 base_url / model",
+    429: "请求过于频繁，请稍后重试",
+    500: "服务端内部错误，请稍后重试",
+    502: "网关错误，请稍后重试",
+    503: "服务暂不可用，请稍后重试",
+    504: "服务端响应超时，请稍后重试",
+}
+
+
+def _extract_http_status(exc: Exception) -> Optional[int]:
+    """从各 SDK 异常里尽力取出 HTTP 状态码。"""
+    for attr in ("status_code", "status"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return status
+    cause = exc.__cause__ or exc.__context__
+    if cause is not None and cause is not exc:
+        return _extract_http_status(cause)
+    return None
+
+
+def _extract_error_code(exc: Exception) -> str:
+    """取出 provider 返回的业务错误码，如 InvalidApiKey。"""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        for key in ("code", "type", "error"):
+            value = body.get(key)
+            if isinstance(value, dict):
+                value = value.get("code") or value.get("type")
+            if isinstance(value, str) and value:
+                return value
+    if isinstance(exc, AnthropicStreamError):
+        return exc.error_type or ""
+    return ""
+
+
+def format_api_error(exc: Exception) -> str:
+    """把各类 API 异常压缩成一行人类可读的提示。
+
+    例：``API 调用失败：API Key 无效或已过期，请检查配置（401 InvalidApiKey）``
+    """
+    status = _extract_http_status(exc)
+    code = _extract_error_code(exc)
+    exc_name = type(exc).__name__
+
+    if _is_quota_error(exc):
+        hint = "账户余额不足或额度已用尽，请充值后重试"
+    elif isinstance(exc, AnthropicStreamError):
+        hint = str(exc)
+        code = ""  # 错误类型已包含在 str 里，避免重复
+    elif status is not None:
+        hint = _ERROR_HINTS.get(status) or _ERROR_HINTS.get(status // 100 * 100) or "请求失败"
+    elif "Timeout" in exc_name or "Timeout" in str(type(exc)) or "TimeoutError" in exc_name:
+        hint = "请求超时，请检查网络或稍后重试"
+    elif "Connection" in exc_name or "ProxyError" in exc_name or "RemoteDisconnected" in exc_name:
+        hint = "无法连接到 API 服务，请检查网络或 base_url"
+    else:
+        # 兜底：取首行、去掉超长内容
+        first_line = str(exc).strip().splitlines()[0] if str(exc).strip() else exc_name
+        hint = first_line[:160]
+
+    suffix = ""
+    if status is not None or code:
+        suffix = f"（{' '.join(str(x) for x in (status, code) if x)}）"
+    return f"API 调用失败：{hint}{suffix}"
 
 
 def _retry(func, max_attempts: int = 3, backoff_base: float = 3.0,

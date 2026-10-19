@@ -244,6 +244,10 @@ class BaseStreamConsumer:
     def _handle_stream_error(self, e: Exception, interrupt_event=None) -> None:
         pass
 
+    def report_api_error(self, message: str) -> None:
+        """展示一条单行 API 错误（红色小提示），由各 console 覆写。"""
+        pass
+
     def _post_stream(self) -> None:
         pass
 
