@@ -134,6 +134,9 @@ class JifyTheme:
 
 
 class OutputEngine:
+    # 最终回答前的固定长度分隔线（长度固定，不随终端宽度变化）
+    SEPARATOR = "---"
+
     THINK_PHRASES = [
         "Happy EveryDay", "Do a Nice Job", "Keep It Real",
         "Stay Curious", "Think Deeply", "Code with Joy",
@@ -851,6 +854,8 @@ class OutputEngine:
         if self._stream_buffer.strip():
             if is_final:
                 self.queue_output(Text(""))
+                # 固定长度分隔线：用 Text 直出，避免交给 Markdown 解析成整行 hr
+                self.queue_output(Text(self.SEPARATOR, style="white"))
             self.output_markdown(self._stream_buffer)
             self._stream_buffer = ""
 
