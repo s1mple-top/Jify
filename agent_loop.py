@@ -60,7 +60,7 @@ class AgentConfig:
     provider: str = "openai"  # openai | anthropic
     base_url: str = "https://Jify.xy/v1"
     api_key: str = ""
-    max_iterations: int = 300
+    max_iterations: int = 500
     tool_delay: float = 0.0
     max_workers: int = 8
     tool_timeout: float = 120.0  # 单次工具调用超时（秒）

@@ -1,17 +1,34 @@
-# -*- coding: utf-8 -*-
-"""Skill 经验库 — 自增长实战经验沉淀
+"""Skill 经验库 —— 漏洞挖掘思路与方法论的自增长沉淀
 
-将 skill 拆成两层：
-  - 方法论层（SKILL.md）：静态、可横移，由 skill_create 管理
-  - 经验库层（experience.json）：随真实审计自增长，增量追加
+沉淀的是「挖洞方法论」而非「漏洞个案」：
+  - 方法论层（SKILL.md）：静态、可平移，由 skill_create 管理
+  - 方法库层（vul.json）：随真实审计自增长，按「方法」聚合，个案只作佐证
 
-经验库解决三个结构性空白：
-  1. 单次高价值发现（不依赖 skill_detector 的 frequency 触发）
-  2. 增量追加粒度（append 而非全量重写 SKILL.md）
-  3. 验证结果落点（vuln_verify confirmed 后由 LLM 显式回填）
+数据结构（v2）：
+{
+  "version": 2,
+  "skills": {
+    "security-audit": {
+      "methods": [
+        {
+          "id": "file-upload-audit",
+          "title": "任意文件上传：三查后缀可控 / 落点可执行 / 访问可达",
+          "category": "file_upload",
+          "applies_when": "看到 MultipartFile、上传接口、StorageService.generateKey",
+          "steps": ["后缀是否透传原始文件名", "物理落点是否在 web 根", "..."],
+          "pitfalls": "落点不在 web 根 → 最多存储型 XSS",
+          "cases": [{"project": "litemall", "payload": "...", "evidence": "..."}],
+          "confidence": 3,
+          "added_at": "...",
+          "updated_at": "..."
+        }
+      ]
+    }
+  }
+}
 
-存储位置：~/.jify/skills/{name}/experience.json（用户级，不污染项目）
-读取位置：优先 ~/.jify/skills，回退到项目自带 skill 目录。
+存储位置：~/.jify/vul_experience/vul.json（用户级，不污染项目）
+说明：这是「漏洞挖掘方法论」；「踩坑经验」另存于 ~/.jify/self_evolution/experiences.json。
 """
 
 import json
@@ -21,13 +38,14 @@ from pathlib import Path
 from typing import List, Optional
 
 from tools.registry import register_tool
+from tools.skill_paths import canonical_skill_name, resolve_skill
 from event_bus import UIEvent, event_bus
 
 EXPERIENCE_FILE_NAME = "experience.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-# 去重主键字段：同一 skill 下，vuln_type + source_pattern 相同视为重复条目
-_DEDUP_KEYS = ("vuln_type", "source_pattern")
+# 漏洞挖掘方法库（用户级单文件）。与 self_evolution 下的「踩坑经验」是两套独立数据。
+VUL_DB_PATH = Path.home() / ".jify" / "vul_experience" / "vul.json"
 
 # 有效漏洞类型（与 vuln_verify 保持一致，允许空值表示非漏洞类经验）
 VALID_VULN_TYPES = {
@@ -36,42 +54,114 @@ VALID_VULN_TYPES = {
     "info_disclosure", "other", "attack_surface", "bypass_technique",
 }
 
+# 单个方法在 prompt 中的渲染上限
+MAX_METHODS = 20
+
 
 def resolve_skill_dir(skill_name: str) -> Optional[Path]:
-    """解析 skill 目录，优先级与 load_skill 保持一致：local > ~/.jify/skills > OpenClaw。"""
-    project_dir = Path(__file__).parent.parent.parent
-    candidates = [
-        project_dir / "skills" / skill_name,
-        Path.home() / ".jify" / "skills" / skill_name,
-        Path.home() / ".openclaw" / "workspace" / "skills" / skill_name,
-    ]
-    for p in candidates:
-        if p.exists() and p.is_dir():
-            return p
-    return None
+    """解析 skill 目录，与 load_skill 共用同一套解析逻辑。"""
+    return resolve_skill(skill_name)
 
 
-def _experience_write_path(skill_name: str) -> Path:
-    """经验库写入路径（用户级，固定）。"""
-    return Path.home() / ".jify" / "skills" / skill_name / EXPERIENCE_FILE_NAME
+def _slugify(text: str) -> str:
+    """把标题转成稳定的方法 ID。"""
+    s = re.sub(r"[^\w\s-]", "", text.strip().lower())
+    s = re.sub(r"[\s_]+", "-", s).strip("-")
+    return s[:64] or "method"
 
 
-def _experience_read_paths(skill_name: str) -> List[Path]:
-    """经验库读取候选路径（写入点优先，回退项目自带）。"""
-    paths = [_experience_write_path(skill_name)]
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _read_db() -> dict:
+    """读取整个方法库，返回 {"version": int, "skills": {...}}。"""
+    p = VUL_DB_PATH
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("skills"), dict):
+                return data
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {"version": SCHEMA_VERSION, "skills": {}}
+
+
+def _write_db(db: dict) -> None:
+    VUL_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    VUL_DB_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _legacy_experience_paths(skill_name: str) -> List[Path]:
+    """旧版按 skill 分文件的经验库位置，仅用于存量兼容读取。"""
+    paths = []
     d = resolve_skill_dir(skill_name)
     if d is not None:
-        p = d / EXPERIENCE_FILE_NAME
-        if p not in paths:
-            paths.append(p)
+        paths.append(d / EXPERIENCE_FILE_NAME)
+    legacy_user = Path.home() / ".jify" / "skills" / skill_name / EXPERIENCE_FILE_NAME
+    if legacy_user not in paths:
+        paths.append(legacy_user)
     return paths
 
 
-def load_entries(skill_name: str) -> List[dict]:
-    """读取某 skill 的经验条目（合并所有候选路径，去重）。"""
-    seen = set()
-    entries: List[dict] = []
-    for p in _experience_read_paths(skill_name):
+def _legacy_entry_to_method(entry: dict) -> dict:
+    """把 v1 的个案条目降级为 v2 的方法（单个 case）。"""
+    title = (entry.get("approach") or entry.get("source_pattern") or "未命名方法").strip()
+    case = {
+        "project": (entry.get("framework_hint") or "").strip(),
+        "payload": (entry.get("payload") or "").strip(),
+        "evidence": (entry.get("evidence") or "").strip(),
+    }
+    return {
+        "id": _slugify(title),
+        "title": title[:120],
+        "category": (entry.get("vuln_type") or "").strip(),
+        "applies_when": (entry.get("source_pattern") or "").strip(),
+        "steps": [s.strip() for s in (entry.get("approach") or "").split("\n") if s.strip()],
+        "pitfalls": (entry.get("note") or "").strip(),
+        "cases": [case] if any(case.values()) else [],
+        "confidence": 1 if any(case.values()) else 0,
+        "added_at": entry.get("added_at") or _now(),
+        "updated_at": entry.get("added_at") or _now(),
+    }
+
+
+def _normalize_case(raw: dict) -> dict:
+    case = {
+        "project": str(raw.get("project", "")).strip(),
+        "payload": str(raw.get("payload", "")).strip(),
+        "evidence": str(raw.get("evidence", "")).strip(),
+    }
+    return case if any(case.values()) else {}
+
+
+def _merge_case(method: dict, case: dict) -> bool:
+    """把 case 合并进方法（同 project+payload 视为重复）。返回是否新增。"""
+    if not case:
+        return False
+    for c in method.get("cases", []):
+        if c.get("project", "").lower() == case["project"].lower() and \
+           c.get("payload", "").strip() == case["payload"]:
+            return False
+    method.setdefault("cases", []).append(case)
+    method["confidence"] = len(method["cases"])
+    method["updated_at"] = _now()
+    return True
+
+
+def load_methods(skill_name: str) -> List[dict]:
+    """读取某 skill 的方法列表（按置信度降序）。当前库 + 旧版遗留文件合并。"""
+    section = _read_db()["skills"].get(skill_name)
+    methods: List[dict] = []
+    if isinstance(section, dict):
+        if isinstance(section.get("methods"), list):
+            methods = [m for m in section["methods"] if isinstance(m, dict)]
+        elif isinstance(section.get("entries"), list):
+            # v1 兼容
+            methods = [_legacy_entry_to_method(e) for e in section["entries"] if isinstance(e, dict)]
+
+    seen = {m.get("id") for m in methods}
+    for p in _legacy_experience_paths(skill_name):
         if not p.exists():
             continue
         try:
@@ -81,160 +171,204 @@ def load_entries(skill_name: str) -> List[dict]:
         for e in data.get("entries", []):
             if not isinstance(e, dict):
                 continue
-            key = _dedup_key(e)
-            if key in seen:
+            m = _legacy_entry_to_method(e)
+            if m["id"] in seen:
                 continue
-            seen.add(key)
-            entries.append(e)
-    entries.sort(key=lambda e: e.get("added_at", ""), reverse=True)
-    return entries
+            seen.add(m["id"])
+            methods.append(m)
+
+    methods.sort(key=lambda m: (m.get("confidence", 0), m.get("updated_at", "")), reverse=True)
+    return methods
 
 
-def _dedup_key(entry: dict) -> tuple:
-    return tuple(str(entry.get(k, "")).strip().lower() for k in _DEDUP_KEYS)
+def append_method(skill_name: str, method: dict, case: dict = None) -> dict:
+    """新增或合并一个挖洞方法。
 
-
-def _load_full(skill_name: str) -> dict:
-    """读取完整 JSON（含 version 字段），不存在则返回空结构。"""
-    p = _experience_write_path(skill_name)
-    if p.exists():
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and isinstance(data.get("entries"), list):
-                return data
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {"version": SCHEMA_VERSION, "entries": []}
-
-
-def append_entry(skill_name: str, entry: dict) -> dict:
-    """增量追加一条经验，去重后落盘到用户级经验库。
+    - 同 id 已存在：只补充空字段并合并 case，不新建
+    - 不存在：按传入字段新建
 
     Returns:
-        {"success": bool, "added": bool, "skipped_reason": str, "count": int}
+        {"success": bool, "added": bool, "merged": bool, "skipped_reason": str, "count": int, "id": str}
     """
-    normalized = {
-        "vuln_type": str(entry.get("vuln_type", "")).strip(),
-        "source_pattern": str(entry.get("source_pattern", "")).strip(),
-        "payload": str(entry.get("payload", "")).strip(),
-        "evidence": str(entry.get("evidence", "")).strip(),
-        "framework_hint": str(entry.get("framework_hint", "")).strip(),
-        "approach": str(entry.get("approach", "")).strip(),
-        "note": str(entry.get("note", "")).strip(),
-        "added_at": entry.get("added_at") or datetime.now().isoformat(timespec="seconds"),
+    title = str(method.get("title", "")).strip()
+    if not title:
+        return {"success": False, "added": False, "merged": False,
+                "skipped_reason": "缺少 title：方法必须有标题", "count": 0, "id": ""}
+
+    method_id = _slugify(str(method.get("id") or title))
+    db = _read_db()
+    section = db["skills"].get(skill_name)
+    if not isinstance(section, dict) or not isinstance(section.get("methods"), list):
+        section = {"version": SCHEMA_VERSION, "methods": []}
+
+    existing = next((m for m in section["methods"] if m.get("id") == method_id), None)
+    case = _normalize_case(case or {})
+
+    if existing is not None:
+        # 补齐空字段，不覆盖已有内容
+        filled = False
+        for key in ("category", "applies_when", "pitfalls"):
+            val = str(method.get(key, "")).strip()
+            if val and not existing.get(key):
+                existing[key] = val
+                filled = True
+        steps = [s.strip() for s in method.get("steps", []) if str(s).strip()]
+        if steps and not existing.get("steps"):
+            existing["steps"] = steps
+            filled = True
+        case_added = _merge_case(existing, case)
+        if filled or case_added:
+            existing["updated_at"] = _now()
+            db["skills"][skill_name] = section
+            _write_db(db)
+        return {
+            "success": True, "added": False, "merged": filled or case_added,
+            "skipped_reason": "" if (filled or case_added) else "方法已存在且无新增信息",
+            "count": len(section["methods"]), "id": method_id,
+        }
+
+    steps = [str(s).strip() for s in method.get("steps", []) if str(s).strip()]
+    new_method = {
+        "id": method_id,
+        "title": title,
+        "category": str(method.get("category", "")).strip(),
+        "applies_when": str(method.get("applies_when", "")).strip(),
+        "steps": steps,
+        "pitfalls": str(method.get("pitfalls", "")).strip(),
+        "cases": [case] if case else [],
+        "confidence": 1 if case else 0,
+        "added_at": _now(),
+        "updated_at": _now(),
     }
-
-    # 至少有一个可沉淀字段，否则视为空条目
-    meaningful = any(normalized[k] for k in
-                     ("source_pattern", "payload", "evidence", "approach", "note"))
-    if not meaningful:
-        return {"success": False, "added": False, "skipped_reason": "空条目：至少需要 source_pattern/payload/evidence/note 之一", "count": 0}
-
-    data = _load_full(skill_name)
-    new_key = _dedup_key(normalized)
-    if new_key[0] or new_key[1]:
-        existing_keys = {_dedup_key(e) for e in data["entries"]}
-        if new_key in existing_keys:
-            return {"success": True, "added": False, "skipped_reason": "重复条目（vuln_type + source_pattern 已存在）", "count": len(data["entries"])}
-
-    data["entries"].append(normalized)
-
-    p = _experience_write_path(skill_name)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"success": True, "added": True, "skipped_reason": "", "count": len(data["entries"])}
+    section["methods"].append(new_method)
+    db["skills"][skill_name] = section
+    _write_db(db)
+    return {"success": True, "added": True, "merged": False, "skipped_reason": "",
+            "count": len(section["methods"]), "id": method_id}
 
 
-def render_for_prompt(skill_name: str, max_entries: int = 50) -> str:
-    """把经验库渲染为可注入上下文的文本（供 load_skill 附加返回）。"""
-    entries = load_entries(skill_name)
-    if not entries:
+def render_for_prompt(skill_name: str, max_methods: int = MAX_METHODS) -> str:
+    """把方法库渲染为可注入上下文的文本（供 load_skill 附加返回）。
+
+    只渲染方法论骨架（何时用 / 步骤 / 反向边界），个案压成一行佐证。
+    """
+    methods = load_methods(skill_name)
+    if not methods:
         return ""
-    lines = ["", "---", "## 实战经验库（自增长沉淀）", ""]
-    for i, e in enumerate(entries[:max_entries], 1):
-        lines.append(f"### 经验 {i}")
-        if e.get("vuln_type"):
-            lines.append(f"- 类型: {e['vuln_type']}")
-        if e.get("source_pattern"):
-            lines.append(f"- 源码特征: {e['source_pattern']}")
-        if e.get("payload"):
-            lines.append(f"- Payload: {e['payload']}")
-        if e.get("evidence"):
-            lines.append(f"- 验证证据: {e['evidence']}")
-        if e.get("framework_hint"):
-            lines.append(f"- 框架/栈提示: {e['framework_hint']}")
-        if e.get("approach"):
-            lines.append(f"- 挖洞思路: {e['approach']}")
-        if e.get("note"):
-            lines.append(f"- 备注: {e['note']}")
+
+    lines = ["", "---", "## 漏洞挖掘方法库（自增长沉淀）", ""]
+    for i, m in enumerate(methods[:max_methods], 1):
+        conf = m.get("confidence", 0)
+        lines.append(f"### 方法 {i}: {m.get('title', '未命名')}" + (f"  （{conf} 例佐证）" if conf else ""))
+        if m.get("category"):
+            lines.append(f"- 类别: {m['category']}")
+        if m.get("applies_when"):
+            lines.append(f"- 何时适用: {m['applies_when']}")
+        steps = m.get("steps") or []
+        if steps:
+            lines.append("- 检查步骤:")
+            for j, s in enumerate(steps, 1):
+                lines.append(f"  {j}) {s}")
+        if m.get("pitfalls"):
+            lines.append(f"- 反向边界/易误判: {m['pitfalls']}")
+        for c in m.get("cases", [])[:3]:
+            bits = [x for x in (c.get("project"), c.get("payload"), c.get("evidence")) if x]
+            if bits:
+                lines.append(f"- 佐证: {' | '.join(bits)}")
         lines.append("")
+
+    if len(methods) > max_methods:
+        lines.append(f"（另有 {len(methods) - max_methods} 个方法未展开，见 {VUL_DB_PATH}）")
     return "\n".join(lines)
 
 
-# 工具入口：供 LLM 在审计收尾时主动沉淀经验
+# 工具入口：供 LLM 在审计收尾时主动沉淀方法
 @register_tool(
     name="skill_experience_add",
     description=(
-        "向某个 skill 的实战经验库追加一条经验与挖洞思路（自增长沉淀，不覆盖 SKILL.md 方法论）。"
-        "用于把单次审计/挖洞中确认的高价值发现、绕过技巧、攻击面等结构化沉淀下来，"
-        "下次 load_skill 时经验库会随方法论一起加载进上下文。"
+        "向某个 skill 的挖洞方法库沉淀一条「方法论」（不是个案记录）。"
+        "把本次确认有效的挖洞思路抽象成可平移的方法：何时适用、检查步骤、反向边界/易误判，"
+        "个案（project/payload/evidence）只作为佐证挂到 cases 上。"
+        "同 id 的方法已存在时只补充空字段并追加 case，不会重复建档。"
+        "下次 load_skill 时方法库会随 SKILL.md 一起加载进上下文。"
         "重要：仅当漏洞经 vuln_verify 黑盒实测确认为 confirmed，或用户已明确确认该漏洞正确时，"
-        "才可调用本工具落盘经验与思路；仅静态线索、not confirmed、误报、用户否定或未表态的，一律不要落盘。"
+        "才可调用本工具落盘；仅静态线索、not confirmed、误报、用户否定或未表态的，一律不要落盘。"
     ),
     parameters={
         "type": "object",
         "properties": {
             "skill_name": {"type": "string", "description": "目标 skill 名称（如 security-audit）"},
-            "vuln_type": {"type": "string", "description": "漏洞/经验类型（如 sqli、ssrf、bypass_technique、attack_surface，可空）"},
-            "source_pattern": {"type": "string", "description": "源码特征/根因（如 f-string 直接拼接 SQL，参数来自用户输入）"},
-            "payload": {"type": "string", "description": "验证 Payload（如 1' AND '1'='1）"},
-            "evidence": {"type": "string", "description": "验证证据（如布尔盲注响应差异、命令回显）"},
-            "framework_hint": {"type": "string", "description": "框架/技术栈提示（如 FastAPI + 原生 sqlite3）"},
-            "approach": {"type": "string", "description": "本次挖洞思路/定位方法/绕过技巧（如何定位到这个漏洞、用了什么探测手法）"},
-            "note": {"type": "string", "description": "通用备注（兜底字段，非漏洞类经验可用）"},
+            "title": {"type": "string", "description": "方法标题，一句话讲清「查什么/怎么判」，会据此生成稳定 id"},
+            "category": {"type": "string", "description": "方法类别（如 file_upload、authz、ssrf、info_disclosure，可空）"},
+            "applies_when": {"type": "string", "description": "何时适用：触发这条方法的源码特征/接口形态（可空）"},
+            "steps": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "检查步骤，按顺序列出可执行的判定动作（可空）",
+            },
+            "pitfalls": {"type": "string", "description": "反向边界/易误判：什么情况下不成立、容易判错的地方（可空）"},
+            "project": {"type": "string", "description": "个案：项目/技术栈（可空，仅作佐证）"},
+            "payload": {"type": "string", "description": "个案：验证 Payload（可空）"},
+            "evidence": {"type": "string", "description": "个案：验证证据（可空）"},
         },
-        "required": ["skill_name"],
+        "required": ["skill_name", "title"],
     },
     parallel_safe=False,
     requires_approval=True,
 )
 def skill_experience_add(
     skill_name: str,
-    vuln_type: str = "",
-    source_pattern: str = "",
+    title: str,
+    category: str = "",
+    applies_when: str = "",
+    steps: list = None,
+    pitfalls: str = "",
+    project: str = "",
     payload: str = "",
     evidence: str = "",
-    framework_hint: str = "",
-    approach: str = "",
-    note: str = "",
 ) -> str:
-    """追加一条经验到 skill 经验库。"""
+    """沉淀一个挖洞方法（可附带一条个案佐证）到 skill 方法库。"""
     event_bus.put(UIEvent("TEXT", f"* skill_experience_add ( {skill_name} )"))
 
     if not skill_name or not re.match(r"^[a-zA-Z0-9_.\-]+$", skill_name):
         return json.dumps({"success": False, "error": f"无效的 skill_name '{skill_name}'"})
 
-    if vuln_type and vuln_type not in VALID_VULN_TYPES:
-        return json.dumps({"success": False, "error": f"无效的 vuln_type '{vuln_type}'，可选: {sorted(VALID_VULN_TYPES)}"})
+    # 归一为规范名，避免同一 skill 因大小写/别名在方法库里分裂成多段
+    _dir = resolve_skill_dir(skill_name)
+    if _dir is not None:
+        skill_name = canonical_skill_name(_dir)
 
-    result = append_entry(skill_name, {
-        "vuln_type": vuln_type,
-        "source_pattern": source_pattern,
-        "payload": payload,
-        "evidence": evidence,
-        "framework_hint": framework_hint,
-        "approach": approach,
-        "note": note,
-    })
+    if category and category not in VALID_VULN_TYPES:
+        return json.dumps({"success": False, "error": f"无效的 category '{category}'，可选: {sorted(VALID_VULN_TYPES)}"})
+
+    result = append_method(
+        skill_name,
+        {
+            "title": title,
+            "category": category,
+            "applies_when": applies_when,
+            "steps": steps or [],
+            "pitfalls": pitfalls,
+        },
+        {"project": project, "payload": payload, "evidence": evidence},
+    )
 
     if not result["success"]:
         return json.dumps({"success": False, "error": result["skipped_reason"]}, ensure_ascii=False)
-    if not result["added"]:
-        return json.dumps({"success": True, "added": False, "message": result["skipped_reason"], "count": result["count"]}, ensure_ascii=False)
+
+    if result["added"]:
+        msg = f"已新建方法 '{result['id']}'（该 skill 当前 {result['count']} 个方法）"
+    elif result["merged"]:
+        msg = f"已合并进已有方法 '{result['id']}'（该 skill 当前 {result['count']} 个方法）"
+    else:
+        msg = f"方法 '{result['id']}' 已存在且无新增信息，未重复记录"
 
     return json.dumps({
         "success": True,
-        "added": True,
-        "message": f"已追加经验到 '{skill_name}' 经验库（当前 {result['count']} 条）",
-        "path": str(_experience_write_path(skill_name)),
+        "added": result["added"],
+        "merged": result["merged"],
+        "message": msg,
+        "method_id": result["id"],
+        "count": result["count"],
+        "path": str(VUL_DB_PATH),
     }, ensure_ascii=False)

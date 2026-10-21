@@ -1,11 +1,9 @@
 """Shared system prompt builder — single source of truth for CLI and Gateway."""
 
-import json
 import os
-import re
 from datetime import datetime
-from pathlib import Path
-from typing import Optional
+
+from tools.skill_paths import discover_skills
 
 
 # Base template
@@ -107,127 +105,12 @@ URL 限制：除非你确认某个 URL 是用户为编程目的提供的，否�
 
 
 def _discover_skills() -> list[dict[str, str]]:
-    """遍历 skills 目录，返回原始 skill 列表。
+    """遍历 skills 目录，返回原始 skill 列表（仅包含可被 load_skill 加载的条目）。
 
     Returns:
         list[dict[str, str]]: [{"skill_name": "description"}, ...]
     """
-    skills: list[dict[str, str]] = []
-
-    # 1. 本地 skills 目录
-    skills_dir = Path(__file__).parent.parent / "skills"
-    if skills_dir.exists() and skills_dir.is_dir():
-        for skill_path in skills_dir.iterdir():
-            if not skill_path.is_dir():
-                continue
-            meta_json_path = skill_path / "_meta.json"
-            skill_json_path = skill_path / "skill.json"
-            name, description = "", ""
-
-            if meta_json_path.exists():
-                try:
-                    meta_data = json.loads(meta_json_path.read_text(encoding="utf-8"))
-                    name = meta_data.get("slug", "")
-                    description = meta_data.get("description", "")
-                except (json.JSONDecodeError, IOError):
-                    pass
-
-            if (not name or not description) and skill_json_path.exists():
-                try:
-                    skill_data = json.loads(skill_json_path.read_text(encoding="utf-8"))
-                    name = skill_data.get("name", "") or name
-                    description = skill_data.get("description", "") or description
-                except (json.JSONDecodeError, IOError):
-                    continue
-
-            if name:
-                skills.append({name: description})
-
-    # 2. ~/.jify/skills（用户级 skill）
-    jify_skills_dir = Path(os.path.expanduser("~/.jify/skills"))
-    if jify_skills_dir.exists() and jify_skills_dir.is_dir():
-        for skill_path in jify_skills_dir.iterdir():
-            if not skill_path.is_dir():
-                continue
-            meta_json_path = skill_path / "_meta.json"
-            skill_json_path = skill_path / "skill.json"
-            name, description = "", ""
-
-            if meta_json_path.exists():
-                try:
-                    meta_data = json.loads(meta_json_path.read_text(encoding="utf-8"))
-                    name = meta_data.get("slug", "")
-                    description = meta_data.get("description", "")
-                except (json.JSONDecodeError, IOError):
-                    pass
-
-            if (not name or not description) and skill_json_path.exists():
-                try:
-                    skill_data = json.loads(skill_json_path.read_text(encoding="utf-8"))
-                    name = skill_data.get("name", "") or name
-                    description = skill_data.get("description", "") or description
-                except (json.JSONDecodeError, IOError):
-                    continue
-
-            if name:
-                skills.append({name: description})
-
-    # 3. 兼容 OpenClaw 的 skill path
-    openclaw_skills_dirs = [
-        Path(os.path.expanduser("~/.openclaw/workspace/skills")),
-        Path(os.path.expanduser("~/.openclaw/skills")),
-    ]
-    for openclaw_skills_dir in openclaw_skills_dirs:
-        if not (openclaw_skills_dir.exists() and openclaw_skills_dir.is_dir()):
-            continue
-        for skill_path in openclaw_skills_dir.iterdir():
-            if not skill_path.is_dir():
-                continue
-            meta_json_path = skill_path / "_meta.json"
-            skill_json_path = skill_path / "skill.json"
-            name, description = "", ""
-
-            if meta_json_path.exists():
-                try:
-                    meta_data = json.loads(meta_json_path.read_text(encoding="utf-8"))
-                    name = meta_data.get("slug", "")
-                    description = meta_data.get("description", "")
-                except (json.JSONDecodeError, IOError):
-                    pass
-
-            if not name and skill_json_path.exists():
-                try:
-                    skill_data = json.loads(skill_json_path.read_text(encoding="utf-8"))
-                    name = skill_data.get("name", "")
-                    description = skill_data.get("description", "")
-                except (json.JSONDecodeError, IOError):
-                    pass
-
-            # 回退：解析 SKILL.md 的 YAML frontmatter
-            if not name or not description:
-                skill_md_path = skill_path / "SKILL.md"
-                if not skill_md_path.exists():
-                    continue
-                try:
-                    with open(skill_md_path, 'r', encoding='utf-8') as f:
-                        lines = [next(f, '') for _ in range(20)]
-                    content = ''.join(lines)
-                    # 提取 YAML frontmatter 块: "---\nname: xxx\ndescription: yyy\n---..."
-                    fm_match = re.match(r'^---\s*\n(.*?)\n---', content, re.DOTALL)
-                    if fm_match:
-                        frontmatter = fm_match.group(1)
-                        name_match = re.search(r'^name:\s*(.+)', frontmatter, re.MULTILINE)
-                        if name_match:
-                            name = name_match.group(1).strip()
-                            desc_match = re.search(r'^description:\s*(.+)', frontmatter, re.MULTILINE)
-                            description = desc_match.group(1).strip() if desc_match else ""
-                except (IOError, UnicodeDecodeError):
-                    continue
-
-            if name:
-                skills.append({name: description})
-
-    return skills
+    return [{e.name: e.description} for e in discover_skills()]
 
 
 def _get_skills() -> str:

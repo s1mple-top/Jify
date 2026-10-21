@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from tools.registry import register_tool
+from tools.skill_paths import SKILL_MD, canonical_skill_name, resolve_skill
 from tools.builtin.skill_experience import render_for_prompt
 from event_bus import UIEvent, event_bus
 
@@ -71,49 +72,25 @@ def load_skill(skill_name: str) -> str:
     """
     event_bus.put(UIEvent("TEXT", "* preparing load_skill ( " + skill_name + " )"))
 
-    # tools/builtin/load_skill.py → tools/builtin → tools → project root
-    project_dir = Path(__file__).parent.parent.parent
-    skills_dir = project_dir / "skills"
-
-    # 构建本地 skill 目录路径
-    local_skill_md_path = skills_dir / skill_name / "SKILL.md"
-
-    # 构建 OpenClaw skill 目录路径
-    openclaw_skills_dir = Path(os.path.expanduser("~/.openclaw/workspace/skills"))
-    openclaw_skill_md_path = openclaw_skills_dir / skill_name / "SKILL.md"
-
-    # 构建 ~/.jify/skills 目录路径
-    jify_skills_dir = Path(os.path.expanduser("~/.jify/skills"))
-    jify_skill_md_path = jify_skills_dir / skill_name / "SKILL.md"
-
-    # 确定使用哪个目录（优先级: local > ~/.jify/skills > OpenClaw）
-    skill_dir = None
-    skill_md_path = None
-
-    if local_skill_md_path.exists():
-        skill_dir = skills_dir / skill_name
-        skill_md_path = local_skill_md_path
-    elif jify_skill_md_path.exists():
-        skill_dir = jify_skills_dir / skill_name
-        skill_md_path = jify_skill_md_path
-    elif openclaw_skill_md_path.exists():
-        skill_dir = openclaw_skills_dir / skill_name
-        skill_md_path = openclaw_skill_md_path
-    else:
+    skill_dir = resolve_skill(skill_name)
+    if skill_dir is None:
         return str(
             f"Skill '{skill_name}' not found. Available skills are in the local skills directory, ~/.jify/skills, or OpenClaw skills directory.")
+    skill_md_path = skill_dir / SKILL_MD
+    # 统计与经验库统一使用规范名，避免 Weather / weather 被记成两条
+    canonical = canonical_skill_name(skill_dir)
 
     try:
         with open(skill_md_path, 'r', encoding='utf-8') as f:
             content = f.read()
 
         # 附加实战经验库（自增长沉淀，随方法论一起加载）
-        experience_text = render_for_prompt(skill_name)
+        experience_text = render_for_prompt(canonical)
         if experience_text:
             content = content + "\n" + experience_text
 
         # 记录使用量
-        _record_usage(skill_name)
+        _record_usage(canonical)
 
         return str([str(skill_dir.resolve()) , content])
     except Exception as e:

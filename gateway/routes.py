@@ -219,7 +219,7 @@ async def api_get_config():
         "base_url": raw.get("base_url", ""),
         "api_key": raw.get("api_key", ""),
         "api_key_masked": _mask_sensitive(raw.get("api_key", "")),
-        "max_iterations": raw.get("max_iterations", 100),
+        "max_iterations": raw.get("max_iterations", 500),
         "tool_delay": raw.get("tool_delay", 0.0),
         "max_workers": raw.get("max_workers", 8),
         "tool_timeout": raw.get("tool_timeout", 120.0),

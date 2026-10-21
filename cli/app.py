@@ -625,21 +625,23 @@ def _extract_session_history(agent) -> str:
 _LOW_USAGE_DAYS = 5
 _LOW_USAGE_THRESHOLD = 7
 _USAGE_FILE = Path(os.path.expanduser("~/.jify/skills/usage.json"))
-_SKILLS_DIR = Path(os.path.expanduser("~/.jify/skills"))
 
 
 def _check_low_usage_skills() -> List[str]:
-    """检查 ~/.jify/skills/ 下使用量过低的 skill。
-    
+    """检查使用量过低的 skill。
+
     判定条件：
       - skill 首次加载距今超过 _LOW_USAGE_DAYS 天
       - 且加载次数 < _LOW_USAGE_THRESHOLD
 
     对于从未被加载过的 skill（usage.json 中无记录），以目录创建时间作为"首次可用"时间。
-    
+    仅统计可加载的 skill（走 discover_skills，与启动扫描 / load_skill 同一集合）。
+
     Returns:
         低使用率的 skill 名称列表
     """
+    from tools.skill_paths import discover_skills
+
     now = datetime.now()
     low_skills: List[str] = []
 
@@ -651,21 +653,19 @@ def _check_low_usage_skills() -> List[str]:
         except (json.JSONDecodeError, IOError):
             pass
 
-    for skill_dir in _SKILLS_DIR.iterdir():
-        if not skill_dir.is_dir():
-            continue
-        skill_name = skill_dir.name
+    for entry in discover_skills():
+        skill_name = entry.name
 
         if skill_name in usage_data:
-            entry = usage_data[skill_name]
-            first_str = entry.get("first_loaded")
-            load_count = entry.get("load_count", 0)
+            rec = usage_data[skill_name]
+            first_str = rec.get("first_loaded")
+            load_count = rec.get("load_count", 0)
             # first_loaded 为 null（同步后从未 load 过），以目录 mtime 作为可用起始
             if not first_str:
-                first_str = datetime.fromtimestamp(skill_dir.stat().st_mtime).isoformat()
+                first_str = datetime.fromtimestamp(entry.dir.stat().st_mtime).isoformat()
         else:
             # 兜底：usage.json 中不存在（理论上 sync 后不会走到这里）
-            first_str = datetime.fromtimestamp(skill_dir.stat().st_mtime).isoformat()
+            first_str = datetime.fromtimestamp(entry.dir.stat().st_mtime).isoformat()
             load_count = 0
 
         try:

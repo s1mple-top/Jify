@@ -14,6 +14,7 @@ from typing import Optional
 import yaml
 
 from tools.registry import register_tool
+from tools.skill_paths import resolve_skill
 from event_bus import UIEvent, event_bus
 
 # 常量
@@ -96,9 +97,9 @@ def _validate_content_size(content: str) -> Optional[str]:
     return None
 
 
-def _write_meta_json(name: str, description: str) -> None:
-    """写出 skill.json（_get_skills() 用它发现技能）"""
-    skill_json = SKILLS_DIR / name / "skill.json"
+def _write_meta_json(skill_dir: Path, name: str, description: str) -> None:
+    """写出 skill.json（供 discover_skills() 发现技能）"""
+    skill_json = skill_dir / "skill.json"
     skill_json.write_text(
         json.dumps(
             {"name": name, "description": description},
@@ -157,10 +158,12 @@ def skill_create(action: str, name: str, content: str = "") -> str:
 
     skill_dir = SKILLS_DIR / name
     skill_md = skill_dir / "SKILL.md"
+    # 已安装的 skill 可能在项目级 / 用户级 / OpenClaw 任一根目录下
+    existing_dir = resolve_skill(name)
 
     # create
     if action == "create":
-        if skill_dir.exists():
+        if existing_dir is not None:
             return json.dumps(
                 {
                     "success": False,
@@ -184,7 +187,7 @@ def skill_create(action: str, name: str, content: str = "") -> str:
 
         skill_dir.mkdir(parents=True, exist_ok=True)
         skill_md.write_text(content, encoding="utf-8")
-        _write_meta_json(name, fm.get("description", ""))
+        _write_meta_json(skill_dir, name, fm.get("description", ""))
 
         event_bus.put(UIEvent("TEXT", f"* skill_create: created '{name}'"))
 
@@ -199,13 +202,15 @@ def skill_create(action: str, name: str, content: str = "") -> str:
 
     # edit
     elif action == "edit":
-        if not skill_dir.exists() or not skill_md.exists():
+        if existing_dir is None:
             return json.dumps(
                 {
                     "success": False,
                     "error": f"Skill '{name}' does not exist. Use action='create' to make a new one.",
                 }
             )
+        skill_dir = existing_dir
+        skill_md = skill_dir / "SKILL.md"
 
         if not content:
             return json.dumps({"success": False, "error": "Parameter 'content' is required for edit."})
@@ -220,7 +225,7 @@ def skill_create(action: str, name: str, content: str = "") -> str:
         fm = _extract_frontmatter(content)
 
         skill_md.write_text(content, encoding="utf-8")
-        _write_meta_json(name, fm.get("description", ""))
+        _write_meta_json(skill_dir, name, fm.get("description", ""))
 
         event_bus.put(UIEvent("TEXT", f"* skill_create: edited '{name}'"))
 
@@ -234,10 +239,10 @@ def skill_create(action: str, name: str, content: str = "") -> str:
 
     # delete
     elif action == "delete":
-        if not skill_dir.exists():
+        if existing_dir is None:
             return json.dumps({"success": False, "error": f"Skill '{name}' does not exist."})
 
-        shutil.rmtree(skill_dir)
+        shutil.rmtree(existing_dir)
 
         event_bus.put(UIEvent("TEXT", f"* skill_create: deleted '{name}'"))
 
