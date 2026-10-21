@@ -24,6 +24,10 @@ https://github.com/user-attachments/assets/68095fbc-9af2-4019-b8d9-512a754b2d6d
 > Jify ships with security-oriented capabilities (vulnerability discovery, penetration testing, CTF, etc.) along with security-related prompts and tools. When using Claude-series models, this may trigger the provider's safety policies and cause requests to be refused or interrupted.
 >
 > Recommendation: switch to a DeepSeek-series model, or unregister/remove the security-related tools and prompts in Jify before using Claude-series models.
+>
+> Jify 对 Windows 的支持仍存在一定问题，目前暂仅考虑非 Windows 环境（Linux / macOS）。
+>
+> Windows support is currently limited; only non-Windows environments (Linux / macOS) are supported for now.
 
 
 ## Jify 发掘的 CVE 清单 / CVEs Discovered by Jify
