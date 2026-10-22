@@ -2,12 +2,52 @@
 """工具注册中心 — 单例模式，支持文件变更钩子"""
 
 import contextvars
+import inspect
 import json
 import threading
+from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional
 
 from event_bus import event_bus, UIEvent
 from tools.models import ToolDef
+
+
+@lru_cache(maxsize=256)
+def accepts_timeout_param(handler) -> bool:
+    """判断 handler 是否接受 timeout 参数。
+
+    显式声明 timeout，或声明 **kwargs，都算接受。dispatch 用它剔除模型误传的
+    timeout（否则 handler(**args) 直接 TypeError），agent_loop 用它决定要不要
+    把参数里的 timeout 当作外层超时依据 —— 两处必须同一套判定。
+
+    签名无法解析时返回 False：此时传 timeout 大概率也会失败，按「不接受」处理更安全。
+    """
+    if handler is None:
+        return False
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return False
+    if "timeout" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _parse_json_object(text: str) -> Optional[dict]:
+    """若字符串是 JSON 对象则返回解析结果，否则 None（dispatch 据此决定是否透传）。
+
+    先看首字符再解析：exec 的输出常是上百 KB 的普通文本，无谓的 json.loads
+    既慢又必然失败；只有以 '{' 开头才可能是对象。
+
+    仅认 dict：JSON 数组/标量仍走包装，避免改变既有的结果形状。
+    """
+    if not text or text.lstrip()[:1] != "{":
+        return None
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 # Subagent 白名单 (contextvars，协程级隔离)
@@ -94,7 +134,7 @@ class ToolRegistry:
         # Subagent 白名单过滤
         whitelist = _subagent_whitelist.get()
         if whitelist is not None and name not in whitelist:
-            return json.dumps({"error": f"工具 '{name}' 不在 subagent 可用范围内"})
+            return json.dumps({"error": f"工具 '{name}' 不在 subagent 可用范围内"}, ensure_ascii=False)
 
         from plugins.hook_manager import hook_manager
 
@@ -113,11 +153,11 @@ class ToolRegistry:
         block = result.get("block")
         tool = self.get(name)
         if tool is None:
-            output = json.dumps({"error": f"Unknown tool: {name}"})
+            output = json.dumps({"error": f"Unknown tool: {name}"}, ensure_ascii=False)
             error_flag = True
 
         elif block:
-            output = json.dumps({"error": f"Tool '{name}' execution blocked, reason: {result.get('reason')}"})
+            output = json.dumps({"error": f"Tool '{name}' execution blocked, reason: {result.get('reason')}"}, ensure_ascii=False)
             error_flag = True
 
         else:
@@ -136,27 +176,47 @@ class ToolRegistry:
                     return json.dumps({
                         "error": f"Tool '{name}' 被用户中断 (break)。",
                         "approval_break": True,
-                    })
+                    }, ensure_ascii=False)
                 if not approved:
                     return json.dumps({
                         "error": f"Tool '{name}' 被用户拒绝执行，请调整方案。",
                         "approval_denied": True,
-                    })
+                    }, ensure_ascii=False)
 
             error_flag = False
             try:
-                result = tool.handler(**args)
-                # handler 返回 dict（MCP 工具）、str、或有 to_dict() 的对象
+                # 只剔除 timeout：模型可能给不支持该参数的工具传 timeout，
+                # handler(**args) 会直接 TypeError，把一次正常调用变成报错。
+                # 用 key 存在判定而非值非空，覆盖 timeout=null 这种 JSON 写法。
+                call_args = args
+                if "timeout" in args and not accepts_timeout_param(tool.handler):
+                    call_args = {k: v for k, v in args.items() if k != "timeout"}
+                result = tool.handler(**call_args)
+                # handler 返回 dict（MCP 工具）、str、或有 to_dict() 的对象。
+                # dict 与 to_dict() 同为「结构化结果」，一律直接序列化，不再包一层
+                # success/data —— 否则 {"success":true,"data":{"content":[…],"isError":false}}
+                # 会把 MCP 的字段埋深一层，且 error 判定失效。
                 if isinstance(result, dict):
-                    output = json.dumps({"success": True, "data": result})
+                    output = json.dumps(result, ensure_ascii=False)
+                    # error 按真值判断：部分工具正常返回 {"success": true, "error": null}
+                    error_flag = bool(result.get("error"))
                 elif isinstance(result, str):
-                    output = json.dumps({"success": True, "data": result})
+                    # handler 已返回 JSON 对象时直接透传，不再包一层。
+                    # 否则超时/错误状态会被埋进字符串：{"success":true,"data":"{\"timed_out\":true}"}，
+                    # 模型要多解析一层，且中文会被二次转义（实测膨胀近 2x）。
+                    _obj = _parse_json_object(result)
+                    if _obj is not None:
+                        output = result
+                        # 与被包装路径保持一致的 error 语义：让 after_tool_call hook 拿到真实结果
+                        error_flag = bool(_obj.get("error"))
+                    else:
+                        output = json.dumps({"success": True, "data": result}, ensure_ascii=False)
                 elif hasattr(result, 'to_dict'):
-                    output = json.dumps(result.to_dict())
+                    output = json.dumps(result.to_dict(), ensure_ascii=False)
                 else:
-                    output = json.dumps({"success": True, "data": str(result)})
+                    output = json.dumps({"success": True, "data": str(result)}, ensure_ascii=False)
             except Exception as e:
-                output = json.dumps({"error": f"Tool '{name}' execution failed: {e}"})
+                output = json.dumps({"error": f"Tool '{name}' execution failed: {e}"}, ensure_ascii=False)
                 error_flag = True
 
         # Hook after_tool_call

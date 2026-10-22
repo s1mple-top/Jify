@@ -74,8 +74,10 @@ def load_skill(skill_name: str) -> str:
 
     skill_dir = resolve_skill(skill_name)
     if skill_dir is None:
-        return str(
-            f"Skill '{skill_name}' not found. Available skills are in the local skills directory, ~/.jify/skills, or OpenClaw skills directory.")
+        # JSON 对象而非纯文本：dispatch 透传对象，error 落在顶层，模型能识别失败
+        return json.dumps({
+            "error": f"Skill '{skill_name}' not found. Available skills are in the local skills directory, ~/.jify/skills, or OpenClaw skills directory."
+        }, ensure_ascii=False)
     skill_md_path = skill_dir / SKILL_MD
     # 统计与经验库统一使用规范名，避免 Weather / weather 被记成两条
     canonical = canonical_skill_name(skill_dir)
@@ -94,7 +96,7 @@ def load_skill(skill_name: str) -> str:
 
         return str([str(skill_dir.resolve()) , content])
     except Exception as e:
-        return str(f"Error reading skill '{skill_name}': {str(e)}")
+        return json.dumps({"error": f"Error reading skill '{skill_name}': {str(e)}"}, ensure_ascii=False)
 
 
 if __name__ == "__main__":

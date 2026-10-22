@@ -22,6 +22,9 @@ from event_bus import event_bus, UIEvent
 from rich.text import Text
 from subagent import SubagentRunner
 from tools.registry import registry, _subagent_whitelist
+from tools.call_context import (
+    CallContext, register_killer, set_call_context, reset_call_context,
+)
 
 _output_engine: Any = None
 
@@ -64,6 +67,11 @@ class TeamTask:
     error: Optional[str] = None                # 失败原因
     created_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
+    # 取消链路：worker 在自己的线程里执行，拿不到 leader 的 contextvars（裸线程不继承），
+    # 故必须显式传 event。每个任务独立一个，避免上一个已超时任务的取消信号被下一次
+    # delegate 的 clear() 抹掉，导致它永远跑下去。
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    call_ctx: Any = None                       # worker 执行期间挂上的 CallContext
 
 
 @dataclass
@@ -79,6 +87,23 @@ class WorkerDef:
 
 
 # TeamWorker — 轻量级工作线程
+def _cancel_team_task(task: "TeamTask") -> bool:
+    """取消一个在途团队任务。
+
+    两件事都要做，缺一不可：
+    - 置位 cancel_event：worker 内的 subagent 循环会在下个检查点退出
+    - 调 call_ctx.cancel()：worker 内嵌套的长命令（exec 等）登记的 killer 被真正触发
+
+    worker 可能尚未取得任务（call_ctx 还是 None），此时只置位信号即可，
+    worker 启动时会发现并立即退出。
+    """
+    task.cancel_event.set()
+    ctx = task.call_ctx
+    if ctx is not None:
+        ctx.cancel()
+    return True
+
+
 class TeamWorker:
     """
     团队成员。封装 SubagentRunner, 运行在独立线程中, 通过队列接收任务。
@@ -98,7 +123,6 @@ class TeamWorker:
         system_prompt: str,
         whitelist: Set[str],
         max_iterations: int = 20,
-        interrupt_event: Optional[threading.Event] = None,
     ):
         self.worker_id = worker_id
         # model_client 可以是实例，也可以是返回实例的 callable（延迟解析），
@@ -108,7 +132,6 @@ class TeamWorker:
         self.system_prompt = system_prompt
         self.whitelist = whitelist
         self.max_iterations = max_iterations
-        self._interrupt_event = interrupt_event
 
         self._task_queue: queue.Queue = queue.Queue()
         self._result_events: Dict[str, threading.Event] = {}
@@ -277,10 +300,23 @@ class TeamWorker:
                 future.set_exception(e)
 
     def _execute(self, task: TeamTask) -> str:
-        """核心执行: 调 SubagentRunner.run()"""
+        """核心执行: 调 SubagentRunner.run()
+
+        worker 是长驻线程，不能用创建时的 contextvars（每次任务的上文不同），
+        故在执行期间现场挂一个 CallContext，并把它的取消信号与本任务的
+        cancel_event 共用同一个 Event：
+
+        - leader 侧超时 -> killer 置位该 Event 并调 call_ctx.cancel()
+        - SubagentRunner 在每个检查点读到它 -> 优雅退出
+        - 任务内嵌套的长工具（exec 等）通过 call_ctx 登记的 killer 被真正杀掉
+        """
         task.status = "running"
         start = time.time()
         tool_counter = [0]
+
+        call_ctx = CallContext(cancel_event=task.cancel_event)
+        task.call_ctx = call_ctx
+        ctx_token = set_call_context(call_ctx)
 
         task_snippet = task.content[:42] + "…" if len(task.content) > 42 else task.content
 
@@ -320,11 +356,11 @@ class TeamWorker:
                 whitelist_names=self.whitelist,
                 max_iterations=self.max_iterations,
                 on_progress=on_progress, # 状态栏同步进展
-                interrupt_event=self._interrupt_event,
+                interrupt_event=task.cancel_event,
                 history=self._history,
                 out_history=self._history,
             )
-            if self._interrupt_event is not None and self._interrupt_event.is_set():
+            if task.cancel_event.is_set():
                 task.status = "interrupted"
             else:
                 task.status = "completed"
@@ -336,6 +372,9 @@ class TeamWorker:
         finally:
             elapsed = time.time() - start
             task.finished_at = time.time()
+            # 摘掉本任务的调用上下文，避免残留到下一个任务的线程里
+            reset_call_context(ctx_token)
+            task.call_ctx = None
             with self._lock:
                 self._stats["tasks_completed"] += 1
                 self._stats["total_elapsed"] += elapsed
@@ -438,16 +477,16 @@ class TeamLeader:
         self._workers: Dict[str, TeamWorker] = {}
         self._tasks: Dict[str, TeamTask] = {}
         self._lock = threading.Lock()
-        # Worker 共享中断信号：主 Agent Ctrl+C 时 set，Worker 在迭代边界检查后停止当前任务
-        self._interrupt_event = threading.Event()
 
     def interrupt(self) -> None:
         """中断所有 Worker 当前正在执行的任务。不关闭 Worker 线程与团队结构，中断后团队仍可继续委派。"""
-        self._interrupt_event.set()
-
-    def clear_interrupt(self) -> None:
-        """重置中断信号，供下一轮任务使用。"""
-        self._interrupt_event.clear()
+        # 每个任务一个独立信号：worker 线程读的是 task.cancel_event。
+        # 不能共用单一事件——上一次已取消任务的信号会被下一轮 clear() 抹掉，
+        # 导致那个 worker 永远跑下去。
+        with self._lock:
+            pending = [t for t in self._tasks.values() if t.status in ("pending", "running")]
+        for t in pending:
+            _cancel_team_task(t)
 
 
     # Worker 管理
@@ -477,7 +516,6 @@ class TeamLeader:
                 system_prompt=system_prompt,
                 whitelist=whitelist,
                 max_iterations=max_iterations,
-                interrupt_event=self._interrupt_event,
             )
             worker.start()
             self._workers[worker_id] = worker
@@ -518,8 +556,6 @@ class TeamLeader:
         Returns:
             Worker 的输出结果
         """
-        self._interrupt_event.clear()
-
         task = TeamTask(
             id=str(uuid.uuid4()),
             content=task_content,
@@ -541,6 +577,14 @@ class TeamLeader:
                 return "[TeamLeader] 无可用 Worker"
 
             task.worker_id = w.worker_id
+
+        # 外层调用超时/中断时，把取消穿透到 worker 线程：
+        # worker 是裸 threading.Thread，拿不到本线程的 contextvars，只能显式传 event。
+        # 若 worker 已经挂上 call_ctx，一并对它的外部资源执行清理。
+        register_killer(
+            f"team_delegate({task.worker_id})",
+            lambda: _cancel_team_task(task),
+        )
 
         result = w.submit_and_wait(task, timeout=timeout)
 
@@ -569,8 +613,6 @@ class TeamLeader:
         Returns:
             汇总 JSON: {"task_id": "result", ...}
         """
-        self._interrupt_event.clear()
-
         if worker_ids and len(worker_ids) != len(tasks):
             return "[TeamLeader] tasks 与 worker_ids 数量不匹配"
 
@@ -615,6 +657,10 @@ class TeamLeader:
                     raw_results[t.id] = json.dumps({"error": "无可用的 Worker"})
                     continue
                 t.worker_id = w.worker_id
+                register_killer(
+                    f"team_delegate_parallel({t.worker_id})",
+                    lambda _t=t: _cancel_team_task(_t),
+                )
                 futures[t.id] = pool.submit(w.submit_and_wait, t, timeout)
 
             for task_id, fut in futures.items():

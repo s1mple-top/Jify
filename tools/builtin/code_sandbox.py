@@ -19,11 +19,17 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from typing import Any, Dict, Optional
 
 from tools.registry import register_tool
-from tools.builtin.exec_tool import DEFAULT_TIMEOUT, MAX_OUTPUT_BYTES
+from tools.builtin.exec_tool import MAX_OUTPUT_BYTES
+from tools.call_context import register_killer, is_cancelled
 from event_bus import UIEvent, event_bus
+
+# 沙箱默认超时独立于 exec：两者语义不同（exec 跑本地命令，沙箱含容器启停开销），
+# 共用一个常量会让改 exec 的默认值意外改变沙箱行为
+DEFAULT_TIMEOUT = 15
 
 # ============================================================
 # Docker 强制沙箱
@@ -109,6 +115,9 @@ ALLOWED_LANGS = set(LANG_TO_CMD.keys())
     },
     parallel_safe=False,
     requires_approval=False,
+    # 内部 timeout 可由参数指定（默认 15），且 Docker 起容器本身有额外开销；
+    # 外层若停在 15s 默认档，会把用户显式指定的更长 timeout 提前掐断
+    timeout=300,
 )
 def code_sandbox(
     language: str,
@@ -231,34 +240,105 @@ def _escape_rb(v: str) -> str:
     return v.replace("\\", "\\\\").replace('"', '\\"').replace("#", "\\#")
 
 
+def _kill_container(container_name: str) -> bool:
+    """强制终止并删除沙箱容器。
+
+    subprocess.run(timeout=) 超时只会杀掉 docker CLI 客户端，容器已交给 daemon
+    托管，会继续跑满 CPU/内存/网络。--rm 仅作用于容器退出时，不是 kill。
+    因此超时后必须按容器名显式 rm -f（对 running 容器等价于 SIGKILL + 删除）。
+    """
+    if not container_name:
+        return False
+    try:
+        proc = subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
 def _run_docker(container_cmd, timeout):
     """在 Docker 容器内执行命令，返回结构化字典。
 
     container_cmd 为完整 docker run 命令（含镜像与容器内的解释器调用），
     避免经 shell 拼接代码，杜绝命令注入面。
+
+    为容器显式命名，超时后据此强制终止：超时若不 kill，容器会在后台继续运行。
     """
+    container_name = f"jify-sandbox-{uuid.uuid4().hex[:12]}"
+    # --name 插在 docker run 之后，便于超时按名 kill
+    named_cmd = [container_cmd[0], container_cmd[1], "--name", container_name, *container_cmd[2:]]
+
     try:
         import time
         start = time.time()
-        proc = subprocess.run(
-            container_cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        proc = subprocess.Popen(
+            named_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
+            text=True,
         )
+    except Exception as e:
+        return {
+            "success": False,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": "",
+            "duration_ms": 0,
+            "timed_out": False,
+            "error": str(e),
+        }
+
+    # 登记给外层调用：工具自身超时之外，调用超时（线程卡住）时也要清掉容器，
+    # 否则 docker run 客户端被丢弃、容器由 daemon 托管继续跑满 CPU/内存
+    register_killer(
+        f"code_sandbox({container_name})",
+        lambda: _kill_container(container_name),
+    )
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
         duration_ms = int((time.time() - start) * 1000)
+        # 容器被外部取消 rm -f 时，docker run 只会返回非零码；不点明的话
+        # 模型会当成普通执行失败去重试
+        if proc.returncode != 0 and is_cancelled():
+            return {
+                "success": False,
+                "exit_code": proc.returncode,
+                "stdout": _truncate(stdout),
+                "stderr": _truncate(stderr),
+                "duration_ms": duration_ms,
+                "timed_out": False,
+                "cancelled": True,
+                "terminated": True,
+                "error": (
+                    f"调用已被取消，容器 {container_name} 已强制终止。"
+                    "代码可能已执行到中途，副作用可能部分发生。"
+                ),
+            }
         return {
             "success": proc.returncode == 0,
             "exit_code": proc.returncode,
-            "stdout": _truncate(proc.stdout),
-            "stderr": _truncate(proc.stderr),
+            "stdout": _truncate(stdout),
+            "stderr": _truncate(stderr),
             "duration_ms": duration_ms,
             "timed_out": False,
             "error": None,
         }
     except subprocess.TimeoutExpired:
+        killed = _kill_container(container_name)
+        try:
+            proc.communicate(timeout=2)  # 排空管道并回收客户端进程
+        except Exception:
+            pass
         return {
             "success": False,
             "exit_code": -1,
@@ -266,9 +346,23 @@ def _run_docker(container_cmd, timeout):
             "stderr": "",
             "duration_ms": timeout * 1000,
             "timed_out": True,
-            "error": f"容器执行超时 ({timeout}s)，已自动 kill 容器",
+            "killed": killed,
+            # 文案必须与实际动作一致：kill 失败时明确告知容器可能仍在跑，
+            # 否则模型会以为状态已清理而漏掉后续检查
+            "error": (
+                f"容器执行超时 ({timeout}s)，已强制终止容器 {container_name}"
+                if killed else
+                f"容器执行超时 ({timeout}s)，强制终止容器 {container_name} 失败，"
+                f"该容器可能在后台继续运行，请手动确认并清理"
+            ),
         }
     except Exception as e:
+        # 非超时异常同样意味着本次执行已放弃，容器状态不可知，一并清理
+        _kill_container(container_name)
+        try:
+            proc.communicate(timeout=2)
+        except Exception:
+            pass
         return {
             "success": False,
             "exit_code": -1,

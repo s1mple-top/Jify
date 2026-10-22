@@ -7,9 +7,12 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from tools.registry import registry, _subagent_whitelist
+from tools.call_context import is_cancelled
 
 # 线程级 subagent 统计：由 SubagentRunner.run() 写入，CLI _fire_tool 读取
 _subagent_stats: Dict[int, Dict] = {}
+
+_CANCELLED_RESULT = "[subagent] 任务已被取消，未执行完。"
 
 
 class SubagentRunner:
@@ -73,16 +76,30 @@ class SubagentRunner:
 
             last_content = ""
 
+            def _record_stats() -> None:
+                _subagent_stats[threading.get_ident()] = {
+                    "tool_uses": tool_uses,
+                    "elapsed": time.time() - _start,
+                    "sent_est": sent_est,
+                    "recv_est": recv_est,
+                }
+
+            def _bail_if_cancelled() -> Optional[str]:
+                """取消信号命中时收尾并返回终止文案；未命中返回 None。
+
+                只在自然边界调用：每轮迭代开头、流式响应每个 chunk、每次工具执行前。
+                检查点之间的阻塞（单次模型响应、单个长工具）仍需等它自己结束。
+                """
+                if not is_cancelled(interrupt_event):
+                    return None
+                _record_stats()
+                return _CANCELLED_RESULT
+
             for _ in range(max_iterations):
-                # 中断检查：主 Agent Ctrl+C 时中断当前 Worker 任务
-                if interrupt_event is not None and interrupt_event.is_set():
-                    _subagent_stats[threading.get_ident()] = {
-                        "tool_uses": tool_uses,
-                        "elapsed": time.time() - _start,
-                        "sent_est": sent_est,
-                        "recv_est": recv_est,
-                    }
-                    return "[subagent] 任务被用户中断。"
+                # 中断检查：主 Agent Ctrl+C / 调用超时 / team 取消 都汇总到 is_cancelled
+                halted = _bail_if_cancelled()
+                if halted is not None:
+                    return halted
 
                 raw_response = self.model_client.chat(
                     messages=messages,
@@ -93,8 +110,13 @@ class SubagentRunner:
 
                 content = ""
                 tool_call_chunks: Dict[int, Dict] = {}
+                stream_cancelled = False
 
                 for chunk in raw_response:
+                    # 模型流式响应可能持续很久，必须在内层也检查，否则取消要等整段输出完
+                    if is_cancelled(interrupt_event):
+                        stream_cancelled = True
+                        break
                     if chunk.content:
                         content += chunk.content
                         recv_est += len(chunk.content)
@@ -124,6 +146,17 @@ class SubagentRunner:
                             if tc.arguments:
                                 tool_call_chunks[idx]["function"]["arguments"] += tc.arguments
 
+                if stream_cancelled:
+                    # 显式关闭生成器，立即释放底层 HTTP 连接，不等 GC
+                    close = getattr(raw_response, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:
+                            pass
+                    _record_stats()
+                    return _CANCELLED_RESULT
+
                 last_content = content
 
                 # 组装 tool_calls（一次性构建，同时用于 sent_est 更新和后续消息追加）
@@ -140,12 +173,7 @@ class SubagentRunner:
                 ]
 
                 if not tool_calls:
-                    _subagent_stats[threading.get_ident()] = {
-                        "tool_uses": tool_uses,
-                        "elapsed": time.time() - _start,
-                        "sent_est": sent_est,
-                        "recv_est": recv_est,
-                    }
+                    _record_stats()
                     return content
 
                 assistant_msg = {
@@ -158,6 +186,11 @@ class SubagentRunner:
                 sent_est += len(content)
 
                 for tc in tool_calls:
+                    # 逐工具检查：前一个工具可能跑了很久，期间外层已放弃等待
+                    halted = _bail_if_cancelled()
+                    if halted is not None:
+                        return halted
+
                     tool_name = tc["function"]["name"]
                     try:
                         tool_args = json.loads(tc["function"]["arguments"])
@@ -182,12 +215,7 @@ class SubagentRunner:
                 if on_progress:
                     on_progress("token_update", {"sent": sent_est, "recv": recv_est})
 
-            _subagent_stats[threading.get_ident()] = {
-                "tool_uses": tool_uses,
-                "elapsed": time.time() - _start,
-                "sent_est": sent_est,
-                "recv_est": recv_est,
-            }
+            _record_stats()
             return (
                 f"[subagent] 达到最大迭代次数 ({max_iterations})，最后回复:\n{last_content}"
             )

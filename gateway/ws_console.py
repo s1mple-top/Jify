@@ -170,16 +170,37 @@ class WebSocketConsole(BaseStreamConsumer):
 
         return _exec_tool
 
-    def _on_future_result(self, tc_id, future, pre_results, tc_names, tc_args) -> None:
+    def _on_future_result(self, tc_id, future, pre_results, tc_names, tc_args,
+                          timeout: float = 120.0, call_ctx=None) -> None:
+        from agent_loop import _tool_timeout_result
+
+        # 签名 key（name:json(args)），必须与 agent_loop._execute_tools 的命中逻辑一致。
+        # 曾用 tc_id 作 key，导致超时后兜底执行找不到缓存而把工具重复跑一遍。
+        _name = tc_names.get(tc_id, "")
+        _args = tc_args.get(tc_id, {})
+        _sig = f"{_name}:{_json.dumps(_args, sort_keys=True)}"
+
         try:
-            tid, raw, err = future.result(timeout=30)
-            if err:
-                self._send({"type": "tool_error", "tool_id": tid, "error": err})
-            else:
-                self._send({"type": "tool_result", "tool_id": tid, "result": raw})
-            # 签名 key（name:json(args)），与 agent_loop._execute_tools 的预执行匹配逻辑对齐
-            _name = tc_names.get(tc_id, "")
-            _args = tc_args.get(tc_id, {})
-            pre_results[f"{_name}:{_json.dumps(_args, sort_keys=True)}"] = raw
+            tid, raw, err = future.result(timeout=timeout)
         except Exception as e:
-            pre_results[tc_id] = {"error": str(e)}
+            is_timeout = isinstance(e, TimeoutError)
+            if is_timeout and call_ctx is not None:
+                call_ctx.cancel()   # 终止该工具登记的外部资源（进程组 / 容器）
+            payload = (_tool_timeout_result(timeout, call_ctx) if is_timeout
+                       else _json.dumps({"error": str(e)}, ensure_ascii=False))
+            hint = "已终止外部资源" if (is_timeout and call_ctx is not None and call_ctx.killed) else \
+                   ("已放弃等待" if is_timeout else "")
+            self._send({
+                "type": "tool_error",
+                "tool_id": tc_id,
+                "error": (f"工具执行超时（{timeout:g}s），{hint}"
+                          if is_timeout else str(e)),
+            })
+            pre_results[_sig] = payload
+            return
+
+        if err:
+            self._send({"type": "tool_error", "tool_id": tid, "error": err})
+        else:
+            self._send({"type": "tool_result", "tool_id": tid, "result": raw})
+        pre_results[_sig] = raw

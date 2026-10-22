@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import json
+import math
 import concurrent.futures
+import contextvars
 import logging
 import os
 import time
@@ -9,7 +11,7 @@ import queue
 import threading
 import re
 from operator import length_hint
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -22,7 +24,10 @@ from context_manager import ContextManager
 
 from model_client import get_model_client, format_api_error
 from jify_tool import registry, ToolCall, should_parallel, _MAX_WORKERS
-from tools.registry import set_agent_config, reset_agent_config
+from tools.registry import set_agent_config, reset_agent_config, accepts_timeout_param
+from tools.call_context import (
+    CallContext, set_call_context, reset_call_context,
+)
 from event_bus import event_bus, UIEvent
 from plugins.hook_manager import hook_manager
 
@@ -219,13 +224,169 @@ def _resolve_tool_timeout(td, config: "AgentConfig") -> float:
     优先级：工具显式注册 timeout > config.tool_timeout，
     其中审批类工具（requires_approval=True）最低取 config.approval_tool_timeout
     （须 > 审批等待 120s，否则用户批准了、文件也改了，但外层已报假超时）。
+
+    注意 approval_tool_timeout 是下限而非候选值：即便是显式注册了 timeout 的
+    审批类工具，也必须在两者中取大，否则审批保护会被显式值绕过。
     """
     if td and td.timeout is not None:
-        return td.timeout
-    timeout = config.tool_timeout
+        timeout = td.timeout
+    else:
+        timeout = config.tool_timeout
     if td and td.requires_approval:
         timeout = max(timeout, config.approval_tool_timeout)
     return timeout
+
+
+# 单次调用超时的硬上限（秒）。工具参数里的 timeout 来自模型，属外部输入，
+# 不设上限时一次调用就能把外层超时推到任意大，等于变相取消超时保护。
+_MAX_CALL_TIMEOUT = 3600.0
+
+# 参数 timeout 之外留给工具「超时后收尾」的余量：内层 subprocess/future 超时后
+# 还要返回结果、写输出，外层必须略大于内层，否则外层先超时会误报。
+_CALL_TIMEOUT_MARGIN = 30.0
+
+
+def _resolve_call_timeout(td, config: "AgentConfig", args: Any = None) -> float:
+    """解析单次工具调用超时 = 注册值/配置档 与 参数 timeout 取大。
+
+    模型的工具参数里可以带 timeout（如 code_sandbox 跑长样本、team_delegate 等长任务），
+    旧实现完全忽略它，导致这些参数被外层超时提前掐断且模型无从知晓。
+
+    规则：
+    - 仅当工具接受 timeout 参数时才认参数值（判定见 registry.accepts_timeout_param）；
+    - 只放大不放小：参数需严格大于基准值才生效，避免模型把快工具压到 1s；
+    - 参数非法（非数字 / bool / 非正数 / NaN / inf）时忽略，回落基准值；
+    - 叠加余量后封顶 _MAX_CALL_TIMEOUT，params 是外部输入不能无限放大。
+    """
+    base = _resolve_tool_timeout(td, config)
+    if not isinstance(args, dict):
+        return base
+    raw = args.get("timeout")
+    # bool 是 int 子类，必须显式排除；NaN/inf 会让后续比较全部失效，也排除
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return base
+    if not math.isfinite(raw):
+        return base
+    if raw <= 0 or float(raw) <= base:
+        return base
+    if not accepts_timeout_param(td.handler if td else None):
+        return base
+    return min(float(raw) + _CALL_TIMEOUT_MARGIN, _MAX_CALL_TIMEOUT)
+
+
+def _submit_daemon(fn, *args):
+    """在 daemon 线程中执行 fn，返回 (Future, CallContext)。
+
+    不用 ThreadPoolExecutor 的原因：concurrent.futures.thread 会把每个 worker
+    注册进 atexit，解释器退出时要 join 全部 worker。工具永久 hang 时线程无法强杀，
+    这些 worker 会让进程退不出去（CLI 卡在退出）。
+
+    daemon 线程不参与 atexit join，超时后可直接丢弃。
+    限制仍在：Python 无法强杀线程；但通过 CallContext，工具登记的外部资源
+    （子进程 / 容器）可在超时后被真正终止，工具线程随之自行返回。
+
+    必须用 copy_context().run 而非裸线程：裸 threading.Thread 不继承 contextvars，
+    工具将拿不到调用上下文（也无法登记 killer）。
+    """
+    fut: concurrent.futures.Future = concurrent.futures.Future()
+    ctx = CallContext()
+    parent = contextvars.copy_context()
+
+    def _runner():
+        # cancel() 生效时不执行 fn，语义与 executor 一致
+        if not fut.set_running_or_notify_cancel():
+            return
+
+        def _inner():
+            token = set_call_context(ctx)
+            try:
+                return fn(*args)
+            finally:
+                reset_call_context(token)
+
+        try:
+            fut.set_result(parent.run(_inner))
+        except BaseException as e:  # 含 SystemExit，保证 Future 一定有结果
+            fut.set_exception(e)
+
+    threading.Thread(target=_runner, daemon=True, name="jify-tool-call").start()
+    return fut, ctx
+
+
+def _tool_timeout_result(timeout: float, ctx: Optional[CallContext] = None) -> str:
+    """构造超时结果。
+
+    必须如实告知当前处于哪种状态，两者对模型的下一步决策完全不同：
+
+    - 已终止：工具登记的外部资源（子进程 / 容器）已被杀掉，执行确实停住了，
+      但副作用可能只做了一半（命令跑到中途、文件写了一半）。
+    - 无法终止：Python 线程无法强杀，工具仍在后台跑，副作用还在持续发生。
+
+    若不说清楚，模型会把两种情况都当成「失败」直接重试，导致重复执行。
+    """
+    results = list(ctx.kill_results) if ctx is not None else []
+    summary = ctx.summary() if ctx is not None else None
+
+    if results:
+        all_ok = all(ok for _, ok, _ in results)
+        if all_ok:
+            head = (
+                f"工具执行超时（{timeout:g}s），已停止等待并终止其占用的外部资源"
+                f"（{summary}）。执行已确实停止，但副作用可能已部分发生"
+                "（如命令执行到中途、文件未写完）。"
+            )
+            payload = {"timed_out": True, "terminated": True}
+        else:
+            head = (
+                f"工具执行超时（{timeout:g}s），已尝试终止其外部资源，部分失败"
+                f"（{summary}）。残留资源可能仍在运行。"
+            )
+            payload = {"timed_out": True, "terminated": False, "may_still_be_running": True}
+    else:
+        head = (
+            f"工具执行超时（{timeout:g}s），已停止等待并发出取消信号。"
+            "支持协作式取消的工具会在下一个检查点退出；其余工具仍会继续在后台运行，"
+            "其副作用可能仍持续发生。"
+        )
+        payload = {
+            "timed_out": True,
+            "terminated": False,
+            "cancel_requested": True,
+            "may_still_be_running": True,
+        }
+
+    payload["error"] = head + "请先检查实际状态再决定是否重试，避免重复执行。"
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _result_is_error(raw: str) -> bool:
+    """判断工具结果字符串是否表示失败。
+
+    error 字段按真值判断而非「键存在」：code_sandbox 正常完成时返回
+    {"success": true, "error": null}，用 `"error" in parsed` 会把成功误判成失败。
+    """
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(parsed, dict) and bool(parsed.get("error"))
+
+
+def _timed_out_call(tc: "ToolCall", timeout: float, elapsed: float,
+                    ctx: Optional[CallContext] = None) -> "ToolCall":
+    """为超时的工具调用构造独立结果对象。
+
+    不复用原对象：后台线程仍在运行，若它稍后回写 tc.result，会与超时结果产生竞态，
+    导致同一次调用在 messages 里出现「先报超时、后变成成功」的不一致记录。
+    """
+    return ToolCall(
+        id=tc.id,
+        name=tc.name,
+        args=tc.args,
+        result=_tool_timeout_result(timeout, ctx),
+        duration=elapsed,
+        error=True,
+    )
 
 
 class AgentLoop:
@@ -404,6 +565,12 @@ class AgentLoop:
         self._last_api_error = None
         self._interrupt_requested = False
         self._interrupt_event.clear()
+        # 兜底压缩的防死循环守卫只在「单轮」内有效：每轮允许自救一次（压缩后仍溢出则放弃），
+        # 但不能跨轮沿用 —— 否则同进程第二次独立溢出时不再尝试，直接硬失败
+        self._context_emergency_compressed = False
+        # 轮次起点兜底：上一轮异常退出（中断 / API 报错）可能残留思考原文，
+        # 不清空会被当作本轮首次请求的 extra_body.reasoning_content 发给模型
+        console.last_reasoning_content = ""
         from tools.approval import clear_break
         clear_break()
 
@@ -542,6 +709,9 @@ class AgentLoop:
                     reasoning_content=console.last_reasoning_content,
                     thinking_blocks=console.last_thinking_blocks or None,
                 ))
+                # 与工具分支对齐：本轮流已消费完毕，清空思考原文，
+                # 避免下一轮 _call_model 把它当成 extra_body.reasoning_content 回传
+                console.last_reasoning_content = ""
 
                 # Hook llm_output
                 hook_manager.trigger("llm_output", {
@@ -701,10 +871,11 @@ class AgentLoop:
         如果 pre_results 中已有结果，直接使用（流式预执行），不再重复调用。
         """
         pre_results = pre_results or {}
-        enhanced = []
-        pre_done = []
+        # 按原始 tool_calls 下标占位，保证返回顺序与模型给出的顺序一致
+        slots: List[Optional[ToolCall]] = [None] * len(tool_calls)
+        enhanced: List[Tuple[int, ToolCall]] = []
 
-        for tc in tool_calls:
+        for idx, tc in enumerate(tool_calls):
             tcall = ToolCall(
                 id=tc["id"],
                 name=tc["function"]["name"],
@@ -715,42 +886,53 @@ class AgentLoop:
             if _sig in pre_results:
                 tcall.result = pre_results[_sig]
                 tcall.duration = 0
-                tcall.error = False
-                try:
-                    parsed = json.loads(tcall.result)
-                    if isinstance(parsed, dict) and "error" in parsed:
-                        tcall.error = True
-                except Exception:
-                    pass
-                pre_done.append(tcall)
+                tcall.error = _result_is_error(tcall.result)
+                slots[idx] = tcall
             else:
-                enhanced.append(tcall)
+                enhanced.append((idx, tcall))
 
         # 全部预执行完成 → 直接返回
         if not enhanced:
-            return pre_done
+            return [tc for tc in slots if tc is not None]
 
         # 剩余工具按策略执行
-        if should_parallel(enhanced):
-            results = self._execute_parallel(enhanced)
+        pending = [tc for _, tc in enhanced]
+        if should_parallel(pending):
+            done = self._execute_parallel(pending)
         else:
-            results = self._execute_sequential(enhanced)
+            done = self._execute_sequential(pending)
 
-        return pre_done + results
+        for (idx, _), tc_result in zip(enhanced, done):
+            slots[idx] = tc_result
+
+        return [tc for tc in slots if tc is not None]
 
     def _execute_parallel(self, tool_calls: List[ToolCall]) -> List[ToolCall]:
-        """并行执行：ThreadPoolExecutor，支持 interrupt + 审批 break + 超时"""
+        """并行执行：每个工具独立超时，超时后不再等待后台线程。
+
+        关键点：ThreadPoolExecutor 退出 with 时会 shutdown(wait=True) join 住 worker，
+        把已检测到的超时原样抵消（表现为「超时形同虚设、永久 hang 卡死」）；
+        即便手动 shutdown(wait=False)，worker 仍被 concurrent.futures.thread 注册进
+        atexit，永久 hang 的线程会让进程退不出去。故改用 daemon 线程（_submit_daemon）。
+
+        线程无法强杀，工具可能仍在后台跑完，故超时结果里提示副作用可能已发生。
+        """
         from tools.approval import break_requested
 
-        results = [None] * len(tool_calls)
-        interrupted = False
+        results: List[Optional[ToolCall]] = [None] * len(tool_calls)
+        # 已放弃的调用：超时后由外层写入超时结果，工具线程的晚到回写必须被丢弃，
+        # 否则同一调用会出现「先报超时、后变成工具自定义内容」的不一致记录
+        abandoned: set = set()
+        state_lock = threading.Lock()
 
         def _worker(index: int, tc: ToolCall):
             if self._interrupt_requested or break_requested.is_set():
                 tc.result = "[Skipped — user interrupt]"
                 tc.error = True
                 tc.duration = 0
-                results[index] = tc
+                with state_lock:
+                    if index not in abandoned:
+                        results[index] = tc
                 return
 
             start = time.time()
@@ -760,48 +942,89 @@ class AgentLoop:
                 result = json.dumps({"error": str(e)})
             tc.result = result
             tc.duration = time.time() - start
-            tc.error = False
-            try:
-                parsed = json.loads(result)
-                if isinstance(parsed, dict) and "error" in parsed:
-                    tc.error = True
-            except Exception:
-                pass
+            tc.error = _result_is_error(result)
 
-            results[index] = tc
+            with state_lock:
+                if index not in abandoned:
+                    results[index] = tc
 
         workers = min(len(tool_calls), self.config.max_workers, _MAX_WORKERS)
+        # 批内并发上限：槽位被永久 hang 的工具占满时，其余工具等不到槽位，
+        # 由下方 deadline 逻辑判超时返回，而不是无限排队
+        slots = threading.BoundedSemaphore(workers)
 
-        timeout = max(
-            _resolve_tool_timeout(registry.get(tc.name), self.config)
+        def _guarded(index: int, tc: ToolCall, wait_budget: float):
+            if not slots.acquire(timeout=max(wait_budget, 0)):
+                return  # 未拿到槽位，results[index] 保持 None，由外层按 deadline 判超时
+            try:
+                _worker(index, tc)
+            finally:
+                slots.release()
+
+        # 每个工具各自 deadline（从提交时刻起算），避免一个慢工具拖住整批
+        # 参数里的 timeout 参与计算，否则模型请求的长任务会被注册值提前掐断
+        submit_at = time.time()
+        deadlines = [
+            submit_at + _resolve_call_timeout(registry.get(tc.name), self.config, tc.args)
             for tc in tool_calls
-        )
-        deadline = time.time() + timeout
+        ]
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(_worker, i, tc)
-                for i, tc in enumerate(tool_calls)
-            ]
-            while True:
-                done, _ = concurrent.futures.wait(futures, timeout=0.2)
-                if len(done) == len(futures):
-                    break
-                if self._interrupt_requested or break_requested.is_set():
-                    interrupted = True
-                    for f in futures:
-                        f.cancel()
-                    break
-                if time.time() >= deadline:
-                    interrupted = True
-                    break
+        submitted = [
+            _submit_daemon(_guarded, i, tc, deadlines[i] - submit_at)
+            for i, tc in enumerate(tool_calls)
+        ]
+        futures = [f for f, _ in submitted]
+        ctxs = [c for _, c in submitted]
 
-        timeout_text = f"[超时 — 超过 {timeout:.0f}s]"
-        for i, tc in enumerate(tool_calls):
-            if results[i] is None:
-                tc.result = timeout_text
-                tc.error = True
-                tc.duration = timeout
+        aborted = False
+        while True:
+            pending = [i for i, f in enumerate(futures) if not f.done()]
+            if not pending:
+                break
+            if self._interrupt_requested or break_requested.is_set():
+                aborted = True
+                for f in futures:
+                    f.cancel()
+                break
+            now = time.time()
+            # 尚未完成的工具全部超时，才结束等待
+            if all(now >= deadlines[i] for i in pending):
+                break
+            wait_for = min(deadlines[i] - now for i in pending)
+            concurrent.futures.wait(futures, timeout=min(0.2, max(wait_for, 0.01)))
+
+        # 快照：此刻仍未完成的调用才是真正被放弃的（之后线程可能因资源被杀而返回）
+        finished = {i for i, f in enumerate(futures) if f.done()}
+
+        # 先标记放弃，阻止工具线程晚到回写；再释放锁做清理（kill 可能耗时数秒）
+        with state_lock:
+            abandoned.update(i for i in range(len(futures)) if i not in finished)
+
+        # 放弃等待的调用必须终止其登记的外部资源（子进程 / 容器），否则进程残留。
+        # 线程本身杀不掉，但 cancel() 会同时置位取消信号，让支持协作式退出的工具
+        # （subagent / team）在下个检查点自行返回——这类工具没有可杀的资源。
+        for i in sorted(abandoned):
+            ctxs[i].cancel()
+
+        # 兜底：超时 / 被取消的调用统一填充，调用方绝不能拿到 None
+        with state_lock:
+            for i, tc in enumerate(tool_calls):
+                if results[i] is not None:
+                    continue
+                if aborted:
+                    # 同样换独立对象，避免 worker 稍后回写造成竞态
+                    results[i] = ToolCall(
+                        id=tc.id,
+                        name=tc.name,
+                        args=tc.args,
+                        result="[Skipped — user interrupt]",
+                        duration=time.time() - submit_at,
+                        error=True,
+                    )
+                else:
+                    results[i] = _timed_out_call(
+                        tc, deadlines[i] - submit_at, time.time() - submit_at, ctxs[i]
+                    )
 
         return results
 
@@ -817,31 +1040,31 @@ class AgentLoop:
                 break
 
             td = registry.get(tc.name)
-            timeout = _resolve_tool_timeout(td, self.config)
+            # 参数里的 timeout 参与计算，与并行路径保持一致
+            timeout = _resolve_call_timeout(td, self.config, tc.args)
 
             start = time.time()
+            # 用 daemon 线程而非 ThreadPoolExecutor：后者 worker 会被注册进 atexit，
+            # 永久 hang 时进程退不出去（详见 _submit_daemon）
+            future, call_ctx = _submit_daemon(self._dispatch_with_config, tc.name, tc.args)
             try:
-                # 方便超时断链
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(self._dispatch_with_config, tc.name, tc.args)
-                    result = future.result(timeout=timeout)
+                result = future.result(timeout=timeout)
             except concurrent.futures.TimeoutError:
-                result = json.dumps({"error": f"Tool timeout after {timeout:.0f}s"})
+                # 线程无法强杀，但可终止其登记的外部资源；kill 不掉的部分靠取消信号
+                call_ctx.cancel()
+                result = _tool_timeout_result(timeout, call_ctx)
                 tc.error = True
             except Exception as e:
                 result = json.dumps({"error": str(e)})
                 tc.error = True
             else:
                 tc.error = False
+            finally:
+                future.cancel()
             tc.result = result
             tc.duration = time.time() - start
             if not tc.error:
-                try:
-                    parsed = json.loads(result)
-                    if isinstance(parsed, dict) and "error" in parsed:
-                        tc.error = True
-                except Exception:
-                    pass
+                tc.error = _result_is_error(result)
 
         return tool_calls
 

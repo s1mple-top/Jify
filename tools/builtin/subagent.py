@@ -59,6 +59,9 @@ def _build_whitelist_schemas() -> list:
     },
     parallel_safe=False,
     # requires_approval=False,
+    # subagent 内部跑完整 agent 循环（默认 20 次迭代，每轮含模型调用 + 工具执行），
+    # 15s 的默认档必然误杀；给足 15 分钟上限，仅作永久 hang 的兜底
+    timeout=900,
 )
 def subagent_run(task: str, max_iterations: int = 20) -> str:
     """

@@ -38,6 +38,8 @@ from team import get_leader
     },
     parallel_safe=True,
     # requires_approval=False,
+    # 外层超时须覆盖内部默认 300s 等待；留余量避免外层先于内层超时
+    timeout=360,
 )
 def team_delegate(task: str, worker_id: str = None, timeout: float = 300) -> str:
     leader = get_leader()
@@ -71,6 +73,8 @@ def team_delegate(task: str, worker_id: str = None, timeout: float = 300) -> str
     },
     parallel_safe=True,
     # requires_approval=False,
+    # 外层超时须覆盖内部默认 300s 等待；留余量避免外层先于内层超时
+    timeout=360,
 )
 def team_broadcast(task: str, timeout: float = 300) -> str:
     leader = get_leader()
@@ -111,6 +115,8 @@ def team_broadcast(task: str, timeout: float = 300) -> str:
     },
     parallel_safe=True,
     # requires_approval=False,
+    # 外层超时须覆盖内部默认 300s 等待；留余量避免外层先于内层超时
+    timeout=360,
 )
 def team_delegate_parallel(
     tasks: list, worker_ids: list = None, timeout: float = 300

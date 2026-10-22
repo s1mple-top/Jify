@@ -15,6 +15,8 @@ import json
 import time
 from typing import Any, Dict, Optional
 
+from tools.call_context import CallContext, set_call_context, reset_call_context
+
 
 def _is_timeout_error(exc: BaseException) -> bool:
     """判断异常是否表示超时。
@@ -49,7 +51,7 @@ class BaseStreamConsumer:
     - _handle_stream_error(e, interrupt_event): 流读取异常
     - _post_stream(): 流结束后（所有 chunk 处理完）
     - _prepare_tool_submit(tc_id, name, args, args_str, registry): fire 前准备，返回 exec 函数或 None
-    - _on_future_result(tc_id, future, pre_results, tc_names, tc_args): 收尾解包 future
+    - _on_future_result(tc_id, future, pre_results, tc_names, tc_args, timeout): 收尾解包 future
     - _finalize_stream(stream_error): 收尾更新状态 / token 计数
     """
 
@@ -65,6 +67,8 @@ class BaseStreamConsumer:
         tc_names: Dict[str, str] = {}
         tc_args: Dict[str, dict] = {}
         tc_id_to_idx: Dict[str, int] = {}
+        # 每个 fire 出去的工具一个 CallContext：超时只能终止该工具名下的外部资源，不牵连并行的其它工具
+        fire_ctxs: Dict[str, Any] = {}
         tool_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
         self._reset_stream_state()
@@ -131,7 +135,7 @@ class BaseStreamConsumer:
                         if cidx not in current_indices and cidx not in _fired_indices:
                             self._fire_tool(cidx, tool_call_chunks, pending_futures,
                                             pre_results, tool_executor, jf_registry,
-                                            tc_names, tc_args, tc_id_to_idx)
+                                            tc_names, tc_args, tc_id_to_idx, fire_ctxs)
                             _fired_indices.add(cidx)
 
                 elif last_seen_idx >= 0 and pending_futures:
@@ -139,7 +143,7 @@ class BaseStreamConsumer:
                         if cidx not in _fired_indices:
                             self._fire_tool(cidx, tool_call_chunks, pending_futures,
                                             pre_results, tool_executor, jf_registry,
-                                            tc_names, tc_args, tc_id_to_idx)
+                                            tc_names, tc_args, tc_id_to_idx, fire_ctxs)
                             _fired_indices.add(cidx)
 
                 last_seen_idx = max(tool_call_chunks.keys()) if tool_call_chunks else -1
@@ -150,7 +154,9 @@ class BaseStreamConsumer:
                 self._post_chunk(chunk)
 
         except KeyboardInterrupt:
-            # Ctrl+C 中断路径：释放线程池后向上抛出，避免跳过 shutdown 泄漏
+            # Ctrl+C 中断路径：先终止已 fire 出去的资源（否则工具继续跑），再释放线程池并向上抛出
+            for _ctx in list(fire_ctxs.values()):
+                _ctx.cancel()
             tool_executor.shutdown(wait=False)
             raise
         except Exception as e:
@@ -165,13 +171,27 @@ class BaseStreamConsumer:
                 if cidx not in _fired_indices:
                     self._fire_tool(cidx, tool_call_chunks, pending_futures,
                                     pre_results, tool_executor, jf_registry,
-                                    tc_names, tc_args, tc_id_to_idx)
+                                    tc_names, tc_args, tc_id_to_idx, fire_ctxs)
                     _fired_indices.add(cidx)
 
+        _aborted = ((interrupt_event is not None and interrupt_event.is_set())
+                    or break_requested.is_set())
         for tc_id, future in pending_futures.items():
             if tc_id in pre_results:
                 continue
-            self._on_future_result(tc_id, future, pre_results, tc_names, tc_args)
+            # 用户已中断 / 审批 break：不再按满额超时等待已 fire 的工具（否则 Ctrl+C 后界面仍卡住）
+            if _aborted:
+                _ctx = fire_ctxs.get(tc_id)
+                if _ctx is not None:
+                    _ctx.cancel()
+                pre_results[f"{tc_names.get(tc_id, '')}:{json.dumps(tc_args.get(tc_id, {}), sort_keys=True)}"] = \
+                    "[Skipped — user interrupt]"
+                continue
+            self._on_future_result(
+                tc_id, future, pre_results, tc_names, tc_args,
+                self._resolve_fire_timeout(tc_names.get(tc_id, ""), tc_args.get(tc_id)),
+                fire_ctxs.get(tc_id),
+            )
 
         tool_executor.shutdown(wait=False)
 
@@ -180,7 +200,7 @@ class BaseStreamConsumer:
         return complete_text, tool_call_chunks, finish_reason, pre_results
 
     def _fire_tool(self, idx, chunks, pending, pre, executor, registry,
-                   tc_names=None, tc_args=None, tc_id_to_idx=None):
+                   tc_names=None, tc_args=None, tc_id_to_idx=None, call_ctxs=None):
         from tools.approval import break_requested
         if break_requested.is_set():
             return
@@ -211,7 +231,20 @@ class BaseStreamConsumer:
         if exec_fn is not None:
             # 显式传播当前 context（含主 Agent config），使 worker 线程中的 subagent_run 能复用
             ctx = contextvars.copy_context()
-            pending[tc_id] = executor.submit(ctx.run, exec_fn, tc_id, name, args)
+            call_ctx = CallContext()
+            if call_ctxs is not None:
+                call_ctxs[tc_id] = call_ctx
+
+            def _run(_fn=exec_fn, _tid=tc_id, _name=name, _args=args, _call_ctx=call_ctx):
+                # 注入调用上下文：工具（exec / code_sandbox 等）据此登记可终止的外部资源。
+                # 不注入则 killer 无法登记，超时只能"放弃等待"，进程/容器会残留。
+                token = set_call_context(_call_ctx)
+                try:
+                    return _fn(_tid, _name, _args)
+                finally:
+                    reset_call_context(token)
+
+            pending[tc_id] = executor.submit(ctx.run, _run)
 
 
     # 钩子（子类实现）
@@ -254,7 +287,28 @@ class BaseStreamConsumer:
     def _prepare_tool_submit(self, tc_id, name, args, args_str, registry):
         return None
 
-    def _on_future_result(self, tc_id, future, pre_results, tc_names, tc_args) -> None:
+    def _resolve_fire_timeout(self, name: str, args: Any = None) -> float:
+        """解析 fire 预执行的收尾等待超时，与 agent_loop 的兜底执行保持同一套配置。
+
+        fire 路径曾各自硬编码（CLI 120s / Gateway 30s），导致 config.tool_timeout
+        和工具自定义 timeout 在这条路上完全不生效。args 一并传入，使模型在参数里
+        请求的长 timeout 在 fire 路径同样生效。
+        """
+        try:
+            from agent_loop import _resolve_call_timeout
+            from jify_tool import registry as jf_registry
+            from tools.registry import get_agent_config
+
+            config = get_agent_config()
+            if config is not None:
+                return _resolve_call_timeout(jf_registry.get(name), config, args)
+        except Exception:
+            pass
+        return 120.0
+
+    def _on_future_result(self, tc_id, future, pre_results, tc_names, tc_args,
+                          timeout: float = 120.0,
+                          call_ctx: Optional[CallContext] = None) -> None:
         pass
 
     def _finalize_stream(self, stream_error: Optional[Exception]) -> None:

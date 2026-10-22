@@ -4,6 +4,8 @@
 
 from pathlib import Path
 
+import json
+
 import agent_loop
 from tools.registry import register_tool
 from tools.symbol_index import build_symbol_index
@@ -56,7 +58,10 @@ def read_file(path: str, offset: int = 0, limit: int = 5000) -> str:
 
         return content
     except Exception as e:
-        return f"Error reading {path}: {e}"
+        # 返回 JSON 对象而非纯文本：dispatch 会透传对象，error 落在顶层。
+        # 若返回 "Error reading ..." 这样的字符串，dispatch 会包成
+        # {"success": true, "data": "Error reading ..."}，模型会误判为成功。
+        return json.dumps({"error": f"Error reading {path}: {e}"}, ensure_ascii=False)
 
 
 @register_tool(
@@ -86,4 +91,5 @@ def write_file(path: str, content: str) -> str:
         msg = f"Written {len(content)} bytes to {path}"
         return msg
     except Exception as e:
-        return f"Error writing {path}: {e}"
+        # 同 read_file：错误必须是 JSON 对象，否则被 dispatch 包成 success=true
+        return json.dumps({"error": f"Error writing {path}: {e}"}, ensure_ascii=False)

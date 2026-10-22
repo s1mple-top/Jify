@@ -349,13 +349,24 @@ class CLIConsole(BaseStreamConsumer):
             return _exec
         return None
 
-    def _on_future_result(self, tc_id, future, pre_results, tc_names, tc_args) -> None:
+    def _on_future_result(self, tc_id, future, pre_results, tc_names, tc_args,
+                          timeout: float = 120.0, call_ctx=None) -> None:
+        from agent_loop import _tool_timeout_result
+
         try:
-            raw = future.result(timeout=120)
+            raw = future.result(timeout=timeout)
         except Exception as e:
             _err_name = tc_names.get(tc_id, "")
             _err_args = tc_args.get(tc_id, {})
-            pre_results[f"{_err_name}:{json.dumps(_err_args, sort_keys=True)}"] = json.dumps({"error": str(e)}, ensure_ascii=False)
+            # 与 agent_loop 兜底执行同一套超时语义：线程无法强杀，副作用可能已发生
+            # （Python 3.11+ concurrent.futures.TimeoutError 即内置 TimeoutError）
+            if isinstance(e, TimeoutError):
+                if call_ctx is not None:
+                    call_ctx.cancel()   # 终止该工具登记的外部资源（进程组 / 容器）
+                payload = _tool_timeout_result(timeout, call_ctx)
+            else:
+                payload = json.dumps({"error": str(e)}, ensure_ascii=False)
+            pre_results[f"{_err_name}:{json.dumps(_err_args, sort_keys=True)}"] = payload
             return
 
         try:
