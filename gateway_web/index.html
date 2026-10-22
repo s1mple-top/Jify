@@ -4,8 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Jify</title>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-<script>marked.setOptions({ breaks: true });</script>
+<script src="/static/vendor/marked.min.js"></script>
+<script>
+// marked 为本地 vendored 资源；若加载失败则降级，后续渲染退回纯文本，避免整块内容渲染失败
+if (typeof marked !== 'undefined' && marked.setOptions) {
+  marked.setOptions({ breaks: true });
+}
+</script>
 <style>
 /* ── Reset & Base ── */
 * { margin:0; padding:0; box-sizing:border-box; }
@@ -814,7 +819,7 @@ body {
   var running = false;
 
   // 加载 skills 列表
-  fetch('/api/skills')
+  fetch('/api/skills?token=' + encodeURIComponent(token))
     .then(function(r) { return r.json(); })
     .then(function(data) {
       var list = document.getElementById('skills-list');
@@ -833,7 +838,7 @@ body {
     });
 
   // 加载插件列表
-  fetch('/api/plugins')
+  fetch('/api/plugins?token=' + encodeURIComponent(token))
     .then(function(r) { return r.json(); })
     .then(function(data) {
       var list = document.getElementById('plugin-list');
@@ -853,7 +858,7 @@ body {
     });
 
   // 加载配置
-  fetch('/api/config')
+  fetch('/api/config?token=' + encodeURIComponent(token))
     .then(function(r) { return r.json(); })
     .then(function(data) {
       configData = data.config || {};
@@ -868,7 +873,6 @@ body {
     });
 
   window.logout = function() {
-    var token = sessionStorage.getItem('token');
     var xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/logout?token=' + encodeURIComponent(token || ''), true);
     xhr.onload = function() {
@@ -954,12 +958,13 @@ body {
       { key: 'SelfEvolutionModel', label: 'Self-Evolution 模型', placeholder: '留空则禁用' },
       { key: 'SelfEvolutionTurn', label: 'Self-Evolution 轮次', placeholder: '8' },
       { key: 'context_compress_threshold', label: '上下文压缩阈值 (字符)', placeholder: '900000' },
-      { key: 'admin_token', label: '管理员 Token', placeholder: 'jify-admin-2024' },
+      { key: 'admin_token', label: '管理员 Token', placeholder: '留空则不修改', masked: configData.admin_token_masked },
     ];
     form.innerHTML = fields.map(function(f) {
       var value = configData[f.key];
       if (value === null || value === undefined) value = '';
-      if (f.key === 'api_key') value = ''; // 不回填，用户编辑时才输入新值
+      // 密钥类字段不回填，用户编辑时输入新值；不输入则保留现有值
+      if (f.key === 'api_key' || f.key === 'admin_token') value = '';
       var hint = '';
       if (f.masked) hint = '<div class="hint">当前: ' + esc(f.masked) + '</div>';
       return '<div class="config-group">' +
@@ -997,7 +1002,7 @@ body {
       }
     });
 
-    fetch('/api/config', {
+    fetch('/api/config?token=' + encodeURIComponent(token), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -1200,6 +1205,16 @@ body {
     return d.innerHTML;
   }
 
+  // 统一 markdown 渲染：marked 不可用时降级为纯文本（保留换行），
+  // 避免 marked.parse 抛 ReferenceError 导致气泡永久空白
+  function renderMarkdown(text) {
+    var src = (text || '').replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+    if (typeof marked !== 'undefined' && marked.parse) {
+      try { return marked.parse(src); } catch (e) { /* 落到纯文本降级 */ }
+    }
+    return '<p>' + esc(src).replace(/\n/g, '<br>') + '</p>';
+  }
+
   // ── 多会话管理 ──
   function renderSessionList() {
     var list = document.getElementById('session-list');
@@ -1339,7 +1354,12 @@ body {
     };
 
     ws.onmessage = function(e) {
-      try { handle(JSON.parse(e.data)); } catch(ex) {}
+      try { handle(JSON.parse(e.data)); }
+      catch(ex) {
+        // 不再静默吞掉：渲染异常会直接表现为“只有空气泡”，必须留下线索
+        console.error('[jify] 处理消息失败:', ex, '| 原始数据:', e.data);
+        addSystem('&#9888; 渲染消息出错：' + (ex && ex.message ? ex.message : ex));
+      }
     };
 
     ws.onclose = function(e) {
@@ -1386,7 +1406,7 @@ body {
         if (!currentMsgEl) currentMsgEl = addAssistant();
         var contentEl = currentMsgEl.querySelector('.content');
         rawMarkdown += data.content;
-        contentEl.innerHTML = marked.parse(rawMarkdown.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n'));
+        contentEl.innerHTML = renderMarkdown(rawMarkdown);
         scrollDown();
         break;
       case 'tool_start':
@@ -1415,7 +1435,7 @@ body {
         if (currentMsgEl) {
           currentMsgEl.classList.remove('streaming');
           var c = currentMsgEl.querySelector('.content');
-          if (c) c.innerHTML = marked.parse(rawMarkdown.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n'));
+          if (c) c.innerHTML = renderMarkdown(rawMarkdown);
         }
         currentMsgEl = null;
         thinkingEl = null;
@@ -1431,6 +1451,14 @@ body {
           '<div class="err-line">&#9888; ' + esc(data.content || 'Unknown error') + '</div>',
           'msg-error'
         );
+        // 报错后必须复位，否则状态栏会一直停在“思考中”，看起来像在等回复
+        if (running) {
+          running = false;
+          if (currentMsgEl) { currentMsgEl.classList.remove('streaming'); currentMsgEl = null; }
+          thinkingEl = null;
+          rawMarkdown = '';
+          setStatus('idle', '出错');
+        }
         break;
       case 'todo_update':
         renderTodo(data.todos);

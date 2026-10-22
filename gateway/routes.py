@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
 
 import yaml
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Depends, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -23,6 +23,9 @@ from .auth import (
     _revoke_token,
     _get_admin_token,
     AdminLoginRequest,
+    is_login_rate_limited,
+    record_login_failure,
+    clear_login_failures,
 )
 from .ws_console import WebSocketConsole
 from config.system_prompt import _discover_skills
@@ -35,6 +38,15 @@ app = FastAPI(title="Jify")
 
 static_dir = Path(__file__).parent.parent / "gateway_web"
 static_dir.mkdir(exist_ok=True)
+
+# 静态资源（如 vendored 的 marked.js）本地挂载，避免依赖外部 CDN 可达性
+try:
+    from fastapi.staticfiles import StaticFiles
+    _vendor_dir = static_dir / "vendor"
+    _vendor_dir.mkdir(exist_ok=True)
+    app.mount("/static/vendor", StaticFiles(directory=_vendor_dir), name="vendor")
+except Exception:
+    pass
 
 # Web 审批桥（gateway 单人模式，进程级全局单例）：工具审批改走浏览器弹窗，而非进程 stdin
 _approval_bridge = ApprovalBridge()
@@ -116,6 +128,20 @@ def _ensure_team_initialized(agent: AgentLoop, config) -> None:
         pass
 
 
+# 鉴权依赖
+
+def _require_user(token: str = Query("")) -> str:
+    """校验 query 中的 token，返回 user_id。
+
+    走 Query 而非 Header 是为了与前端现有 fetch 调用保持一致（无需改动请求头）。
+    缺省空串时返回 401 而非 422，便于前端统一处理未登录。
+    """
+    user_id = _validate_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未授权：无效或过期的 token")
+    return user_id
+
+
 # 页面路由
 
 @app.get("/")
@@ -135,7 +161,7 @@ async def chat_page():
 
 
 @app.get("/api/skills")
-async def api_skills():
+async def api_skills(user_id: str = Depends(_require_user)):
     skills = _discover_skills()
     result = []
     for skill in skills:
@@ -145,7 +171,7 @@ async def api_skills():
 
 
 @app.get("/api/plugins")
-async def api_plugins():
+async def api_plugins(user_id: str = Depends(_require_user)):
     loader = _plugin_loader or PluginLoader(plugins_dir="~/.jify/plugins")
     candidates = loader.discover()
     result = []
@@ -191,8 +217,8 @@ def _mask_sensitive(value: str) -> str:
 
 
 @app.get("/api/config")
-async def api_get_config():
-    """读取当前 config.yaml 并以结构化形式返回"""
+async def api_get_config(user_id: str = Depends(_require_user)):
+    """读取当前 config.yaml 并以结构化形式返回（敏感值只返回脱敏标记）。"""
     try:
         if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -202,22 +228,22 @@ async def api_get_config():
     except Exception:
         raw = {}
 
-    # 返回全量配置；api_key 做脱敏标记
-    # models 列表中的 api_key 也需要脱敏
+    # 敏感值一律不返回明文，只给 *_masked 供前端展示
+    # models 列表中的 api_key 同样移除，仅保留 api_key_masked
     models_raw = raw.get("models", [])
     models_masked = []
     for m in (models_raw if isinstance(models_raw, list) else []):
         if isinstance(m, dict):
             masked = dict(m)
-            if masked.get("api_key"):
-                masked["api_key_masked"] = _mask_sensitive(masked["api_key"])
+            key = masked.pop("api_key", "")
+            if key:
+                masked["api_key_masked"] = _mask_sensitive(key)
             models_masked.append(masked)
 
     fields = {
         "provider": raw.get("provider", ""),
         "model": raw.get("model", ""),
         "base_url": raw.get("base_url", ""),
-        "api_key": raw.get("api_key", ""),
         "api_key_masked": _mask_sensitive(raw.get("api_key", "")),
         "max_iterations": raw.get("max_iterations", 500),
         "tool_delay": raw.get("tool_delay", 0.0),
@@ -226,7 +252,7 @@ async def api_get_config():
         "SelfEvolutionModel": raw.get("SelfEvolutionModel", ""),
         "SelfEvolutionTurn": raw.get("SelfEvolutionTurn", 8),
         "context_compress_threshold": raw.get("context_compress_threshold", 700000),
-        "admin_token": raw.get("admin_token", ""),
+        "admin_token_masked": _mask_sensitive(raw.get("admin_token", "")),
         "plugins_dir": raw.get("plugins_dir", "~/.jify/plugins"),
         "enabled_plugins": raw.get("enabled_plugins", None),
         "models": models_masked,
@@ -252,8 +278,18 @@ class ConfigUpdateRequest(BaseModel):
     models: Optional[list] = None
 
 
+# 敏感字段：提交值为空或带脱敏标记时一律跳过，避免用占位符覆盖真实密钥
+_SECRET_FIELDS = ("api_key", "admin_token")
+_MASK_MARK = "***"
+
+
+def _is_secret_placeholder(value) -> bool:
+    """判断提交的敏感字段值是否为占位符（空串或含脱敏标记）。"""
+    return not isinstance(value, str) or value == "" or _MASK_MARK in value
+
+
 @app.post("/api/config")
-async def api_save_config(req: ConfigUpdateRequest):
+async def api_save_config(req: ConfigUpdateRequest, user_id: str = Depends(_require_user)):
     """保存配置到 config.yaml"""
     # 读取现有配置作为基础
     try:
@@ -267,6 +303,32 @@ async def api_save_config(req: ConfigUpdateRequest):
 
     # 仅覆盖传入的非 None 字段
     updates = req.dict(exclude_none=True)
+
+    # 敏感字段回写保护：占位符跳过
+    for key in _SECRET_FIELDS:
+        if key in updates and _is_secret_placeholder(updates[key]):
+            del updates[key]
+
+    # models 列表中每个模型的 api_key 同样做占位符保护：
+    # 前端只回传 api_key_masked，真实密钥按原列表位置保留
+    models_update = updates.get("models")
+    if isinstance(models_update, list):
+        old_models = current.get("models") or []
+        cleaned = []
+        for i, m in enumerate(models_update):
+            if not isinstance(m, dict):
+                cleaned.append(m)
+                continue
+            item = dict(m)
+            item.pop("api_key_masked", None)
+            if _is_secret_placeholder(item.get("api_key")):
+                item.pop("api_key", None)
+                old_key = old_models[i].get("api_key") if i < len(old_models) and isinstance(old_models[i], dict) else None
+                if old_key:
+                    item["api_key"] = old_key
+            cleaned.append(item)
+        updates["models"] = cleaned
+
     current.update(updates)
 
     # 写回
@@ -278,12 +340,19 @@ async def api_save_config(req: ConfigUpdateRequest):
 
 
 @app.post("/api/admin_login")
-async def api_admin_login(req: AdminLoginRequest):
+async def api_admin_login(req: AdminLoginRequest, request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    if is_login_rate_limited(client_ip):
+        raise HTTPException(status_code=429, detail="登录失败次数过多，请稍后再试")
+
     admin_token = _get_admin_token()
     if not admin_token:
         raise HTTPException(status_code=500, detail="未配置 admin_token")
     if req.token != admin_token:
+        record_login_failure(client_ip)
         raise HTTPException(status_code=401, detail="管理员 token 错误")
+
+    clear_login_failures(client_ip)
     token = _create_token("admin", "admin")
     return {"token": token, "user_id": "admin", "username": "admin"}
 
