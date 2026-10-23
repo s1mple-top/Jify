@@ -544,6 +544,62 @@ class AgentLoop:
         self._session_id = session_id
         return messages
 
+    def _repair_dangling_tool_calls(self) -> None:
+        """补齐上一轮被中断遗留的悬空 tool_calls。
+
+        Ctrl+C 落在工具执行 / 审批等待期间时，assistant(tool_calls) 已 append，
+        但对应的 role="tool" 结果未 append，序列会永久非法（OpenAI 兼容网关 400：
+        assistant message with 'tool_calls' must be followed by tool messages；
+        Anthropic：tool_use 缺少 tool_result），且每次请求都会同样失败。
+
+        一轮内 Ctrl+C 直接展开调用栈、没有修复时机，故只在 run() 入口做一次
+        全量配对检查：缺失的 tool_call_id 就地补一条中断结果。仅比较 role 与
+        tool_call_id，不触碰 content。
+        """
+        if not self.messages:
+            return
+
+        repaired: List[Message] = []
+        missing_total = 0
+        i = 0
+        n = len(self.messages)
+        while i < n:
+            msg = self.messages[i]
+            repaired.append(msg)
+            i += 1
+            if msg.role != "assistant" or not msg.tool_calls:
+                continue
+
+            expected = []
+            for tc in msg.tool_calls:
+                tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                if tc_id:
+                    expected.append(tc_id)
+            if not expected:
+                continue
+
+            # 收集紧随其后的 tool 结果，已应答的 id 记账
+            answered = set()
+            while i < n and self.messages[i].role == "tool":
+                tm = self.messages[i]
+                if tm.tool_call_id:
+                    answered.add(tm.tool_call_id)
+                repaired.append(tm)
+                i += 1
+
+            for tc_id in expected:
+                if tc_id not in answered:
+                    repaired.append(Message(
+                        role="tool",
+                        content="[Skipped — user interrupt]",
+                        tool_call_id=tc_id,
+                    ))
+                    missing_total += 1
+
+        if missing_total:
+            self.messages = repaired
+            logger.warning("repaired %d dangling tool_calls from interrupted turn", missing_total)
+
     def run(self, message_id: str, user_message: str, system_prompt: str, console, tool_schemas,
             initial_messages: Optional[List[Message]] = None) -> Dict[str, Any]:
         """
@@ -607,6 +663,10 @@ class AgentLoop:
                     continue
                 self.messages.append(msg)
             self._resume_messages.clear()
+
+        # 补齐上一轮中断遗留的悬空 tool_calls（必须在 append 本轮 user 之前，
+        # 以免影响 _turn_start_idx；Ctrl+C 展开调用栈时本轮内无修复时机）
+        self._repair_dangling_tool_calls()
 
         # append-only：历史不再重格式化，用户消息作为真实 message 追加到序列末尾
         self.messages.append(Message(role="user", content=user_message))
