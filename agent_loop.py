@@ -845,6 +845,15 @@ class AgentLoop:
             # 统一约定：事件里传原始字符数，显示层统一做一次 //2 换算 token
             event_bus.put(UIEvent("Token_Send", len(text_content or "")))
 
+            # tool_calls 的 arguments 会随 assistant 消息在后续每轮重发给模型，需计入 sent。
+            # 一般工具参数很小可忽略，但 write_file/patch_file 的 arguments 是全文，占比极大。
+            _args_chars = sum(
+                len(str(tc.get("function", {}).get("arguments", "")))
+                for tc in (tool_calls or [])
+            )
+            if _args_chars:
+                event_bus.put(UIEvent("Token_Send", _args_chars))
+
             # 清空 reasoning_content，下轮 consume_stream 会重新填充
             console.last_reasoning_content = ""
 

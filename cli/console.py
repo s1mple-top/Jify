@@ -412,7 +412,11 @@ class CLIConsole(BaseStreamConsumer):
             self.total_tokens_recv + self._token_recv
         )
 
-        self.total_tokens_sent += self._token_sent_target
+        # 动画限流会在 _pending_sent_tokens 里压着尚未释放的余量，收尾时必须一次并入，
+        # 否则这部分字符永久丢失（如 write_file 的大 arguments 远超单次释放上限）。
+        # 下一轮 _reset_stream_state 的 drain 因 pending 已清零，不会重复计数。
+        self.total_tokens_sent += self._token_sent_target + self._pending_sent_tokens
+        self._pending_sent_tokens = 0
         self.total_tokens_recv += self._token_recv
 
     def flush_stream(self, is_final: bool = False) -> None:
