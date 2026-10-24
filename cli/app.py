@@ -30,6 +30,7 @@ from prompt_toolkit.layout import Layout, ScrollablePane
 from prompt_toolkit.layout.containers import HSplit, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style as PTStyle
+from rich.console import Console
 from rich.markdown import Markdown
 from rich.padding import Padding
 from rich.rule import Rule
@@ -1323,7 +1324,7 @@ def single_turn(user_input: str, think_stream: bool = False, safe_exec: bool = F
 def main() -> None:
     ensure_jify_home()
 
-    parser = argparse.ArgumentParser(description="Jify CLI")
+    parser = argparse.ArgumentParser(description="Jify CLI", allow_abbrev=False)
     subparsers = parser.add_subparsers(dest="command", help="子命令")
 
     # 默认 CLI 模式（无子命令时走这里）
@@ -1339,7 +1340,8 @@ def main() -> None:
                         help="输出版本号后退出")
 
     # gateway 子命令
-    gw_parser = subparsers.add_parser("gateway", help="启动 Jify Gateway 服务")
+    gw_parser = subparsers.add_parser("gateway", help="启动 Jify Gateway 服务",
+                                     allow_abbrev=False)
     gw_parser.add_argument("--port", type=int, default=9090,
                            help="监听端口（默认 9090）")
     gw_parser.add_argument("--host", type=str, default="127.0.0.1",
@@ -1348,7 +1350,10 @@ def main() -> None:
     # update 子命令
     subparsers.add_parser("update", help="拉取远程最新版本并更新依赖环境")
 
-    args, _ = parser.parse_known_args()
+    args, unknown = parser.parse_known_args()
+
+    if unknown:
+        _reject_unknown_args(unknown)
 
     # 输出版本号
     if args.version:
@@ -1368,6 +1373,20 @@ def main() -> None:
         single_turn(args.quick, args.think_stream, args.safe_exec, args.show_think)
     else:
         main_loop(args.think_stream, args.safe_exec, args.show_think)
+
+
+def _reject_unknown_args(unknown: List[str]) -> None:
+    """未知参数直接报错退出，避免拼写错误（如 --thnk-stream）被静默忽略。"""
+    unknown_opts = [u for u in unknown if u.startswith("-")]
+    extras = [u for u in unknown if not u.startswith("-")]
+
+    err = Console(stderr=True, theme=JifyTheme.MARKDOWN)
+    if unknown_opts:
+        err.print(Text(f"参数错误: 无法识别的选项 {' '.join(unknown_opts)}", style=JifyTheme.SUBTLE))
+    if extras:
+        err.print(Text(f"参数错误: 多余的参数 {' '.join(extras)}", style=JifyTheme.SUBTLE))
+    err.print(Text("使用 jify --help 查看全部可用参数", style=JifyTheme.SUBTLE))
+    sys.exit(2)
 
 
 def _run_gateway(args: argparse.Namespace) -> None:

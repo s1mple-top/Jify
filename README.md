@@ -59,6 +59,7 @@ jify
 ```
 
 依赖 Python >= 3.11。
+
 Requires Python >= 3.11.
 
 ## 快速开始 / Quick Start
@@ -90,14 +91,17 @@ jify --version
 ```
 
 首次运行会自动创建 `~/.jify/` 目录并生成默认配置。
+
 On first run, `~/.jify/` is created automatically with a default config.
 
 你可以在任何目录下执行jify启动jify
+
 You can run `jify` from any directory to start it.
 
 ## CLI 命令 / CLI Commands
 
 在对话中输入 `/` 可触发自动补全：
+
 Type `/` in a chat to trigger autocompletion:
 
 | 命令 / Command  | 说明 / Description                                           |
@@ -126,6 +130,7 @@ Type `/` in a chat to trigger autocompletion:
 | `--version`          | —              | 输出版本号后退出 / Print version and exit                    |
 
 `--think-stream`、`--safe-exec` 默认均为**关闭**。
+
 `--think-stream` and `--safe-exec` are **off** by default.
 
 子命令 / Subcommands：
@@ -187,6 +192,7 @@ export JIFY_SANDBOX_IMAGE=my-sandbox:tag
 ```
 
 未安装 docker 或镜像缺失时，安全验证流程会直接失败。
+
 If docker is missing or the image is absent, the security verification flow fails directly.
 
 
@@ -197,6 +203,7 @@ If docker is missing or the image is absent, the security verification flow fail
 Extend Agent behavior via hooks. Plugins live in `~/.jify/plugins/`, supporting lifecycle hooks such as `before_prompt_build`, `after_prompt_build`, `llm_input`, `before_api_call`, `after_api_call`, `before_tool_call`, `after_tool_call`, `llm_output`, etc.
 
 亦可透过插件系统注册自定义Tool
+
 Custom tools can also be registered through the plugin system.
 
 ### MCP 支持 / MCP Support
