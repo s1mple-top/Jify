@@ -207,10 +207,14 @@ class JifyCLI:
     """CLI 风格 Jify Agent"""
 
     def __init__(self, think_stream: bool = False, safe_exec: bool = False,
-                 show_think: bool = True) -> None:
+                 show_think: bool = True, no_approve: bool = False) -> None:
         # 设置白名单模式开关
         from tools.builtin.allowlist import set_safe_exec
         set_safe_exec(safe_exec)
+
+        # 设置免审批模式（--no-approve 启动参数）
+        from tools.approval import set_no_approve
+        set_no_approve(no_approve)
 
         # 加载配置
         self.config = AgentConfig.load_from_yaml()
@@ -921,7 +925,7 @@ def _show_trust_prompt(cwd: str) -> bool:
 
 
 def main_loop(think_stream: bool = False, safe_exec: bool = False,
-              show_think: bool = True) -> None:
+              show_think: bool = True, no_approve: bool = False) -> None:
     console.clear()
 
     # 启动风险提示：banner 输出前要求用户确认授权
@@ -931,7 +935,7 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False,
 
 
     # 初始化 Agent
-    agent_cli = JifyCLI(think_stream, safe_exec, show_think)
+    agent_cli = JifyCLI(think_stream, safe_exec, show_think, no_approve)
     agent_cli.start_mcp_async()
 
     # 注入可用模型名，供 /model 命令 Tab 补全
@@ -1301,11 +1305,11 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False,
 
 
 def single_turn(user_input: str, think_stream: bool = False, safe_exec: bool = False,
-                show_think: bool = True) -> None:
+                show_think: bool = True, no_approve: bool = False) -> None:
     """
     单轮快速提问模式（python cli.py -q "你好"）
     """
-    agent_cli = JifyCLI(think_stream, safe_exec, show_think)
+    agent_cli = JifyCLI(think_stream, safe_exec, show_think, no_approve)
 
     console.print()
     meta(f"Jify · {datetime.now().strftime('%H:%M')}")
@@ -1336,6 +1340,8 @@ def main() -> None:
                         help="不在终端输出模型思考内容，仅显示工具调用与最终回答")
     parser.add_argument("--safe-exec", action="store_true", default=False,
                         help="启用 exec 命令白名单模式，拦截危险命令")
+    parser.add_argument("--no-approve", action="store_true", default=False,
+                        help="免审批模式：工具调用不再等待用户审批，适合长程无人值守任务")
     parser.add_argument("--version", action="store_true", default=False,
                         help="输出版本号后退出")
 
@@ -1370,9 +1376,11 @@ def main() -> None:
 
     # 默认 CLI 模式
     if args.quick:
-        single_turn(args.quick, args.think_stream, args.safe_exec, args.show_think)
+        single_turn(args.quick, args.think_stream, args.safe_exec, args.show_think,
+                    args.no_approve)
     else:
-        main_loop(args.think_stream, args.safe_exec, args.show_think)
+        main_loop(args.think_stream, args.safe_exec, args.show_think,
+                  args.no_approve)
 
 
 def _reject_unknown_args(unknown: List[str]) -> None:

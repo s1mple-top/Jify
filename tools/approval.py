@@ -35,10 +35,17 @@ _approval_active = False
 _approval_queue: queue.Queue = queue.Queue()
 _consumer_started = False
 _consumer_lock = threading.Lock()
+_no_approve = False  # 免审批开关：True 时 request_approval 直接放行（--no-approve 启动）
 
 def set_approval_engine(engine: OutputEngine) -> None:
     global _engine
     _engine = engine
+
+
+def set_no_approve(enabled: bool) -> None:
+    """设置免审批模式（启动参数 --no-approve 时调用）。"""
+    global _no_approve
+    _no_approve = enabled
 
 
 def set_web_bridge(bridge) -> None:
@@ -405,6 +412,10 @@ def request_approval(tool_name: str, args: dict, preview: Optional[str] = None,
     # Web 审批桥存在时改走浏览器弹窗（gateway），CLI 仍走终端 consumer
     if _web_bridge is not None:
         return _web_bridge.request(tool_name, args, preview, timeout)
+
+    # 免审批模式：直接放行，不打断长程任务
+    if _no_approve:
+        return True
 
     # queue串行，防止多个线程同时调用 input() 抢 stdin 导致竞态
     _start_consumer()
