@@ -359,7 +359,7 @@ class OutputEngine:
         phase_text = {
             "thinking": "think...",
             "replying": "generate answers...",
-            "compressing": "⏳ 正在整合记忆...",
+            "compressing": "compressing...",
         }.get(model_phase, "offline")
 
         t.append(f" · {phase_text}", style=JifyTheme.SUBTLE)

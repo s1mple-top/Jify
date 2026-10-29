@@ -188,6 +188,13 @@ class CLIConsole(BaseStreamConsumer):
     def _stall_timeout(self) -> Optional[float]:
         return self._STREAM_STALL_TIMEOUT
 
+    _STREAM_FIRST_CHUNK_TIMEOUT = 90  # 首 chunk 前（服务端 prefill 大上下文/缓存失效）宽限
+
+    def _first_chunk_stall_timeout(self) -> Optional[float]:
+        # 压缩替换前缀后远程缓存必然失效，首请求需全量 prefill（150K+ token），
+        # 首 token 延迟常超 15s；中途停滞仍按 15s 严格检测
+        return self._STREAM_FIRST_CHUNK_TIMEOUT
+
     def _on_content(self, text: str) -> None:
         if self._think_stream and self._output.model_phase == "thinking":
             self._output.output_thinking(flush=True)
@@ -240,6 +247,11 @@ class CLIConsole(BaseStreamConsumer):
         self._output.queue_output(
             Text(f"⚠ {message}", style=JifyTheme.RED, no_wrap=False)
         )
+
+    def notify(self, message: str) -> None:
+        """运行期提示直接打印：CLI 在 run 期间没有 event_bus 消费者，
+        走事件总线会积压到下一轮流开始才显示（压缩进度/溢出提示等同理）。"""
+        self._output.queue_output(Text(message, style=JifyTheme.SUBTLE))
 
     def _handle_stream_error(self, e: Exception, interrupt_event=None) -> None:
         error_msg = str(e)

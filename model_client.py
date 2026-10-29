@@ -619,7 +619,10 @@ class OpenAIClient:
             if k in kwargs:
                 extra[k] = kwargs[k]
 
-        _timeout_seq = [10.0] * 5 + [15.0] * 5
+        # 摘要等辅助调用可通过 kwargs 传 retry_timeout_seq 收敛重试（有规则兜底，
+        # 快速失败优于 10 次 × 10-15s 的长重试阻塞）
+        _timeout_seq = kwargs.pop("retry_timeout_seq", None) or [10.0] * 5 + [15.0] * 5
+        _attempts = len(_timeout_seq)
 
         if self._legacy:
             import openai
@@ -629,7 +632,7 @@ class OpenAIClient:
                 params["function_call"] = "auto"
             raw = _retry(
                 lambda timeout: openai.ChatCompletion.create(**params, request_timeout=timeout),
-                max_attempts=10,
+                max_attempts=_attempts,
                 timeout_seq=_timeout_seq,
             )
             if extra.get("stream"):
@@ -649,7 +652,7 @@ class OpenAIClient:
                 chat_kwargs["tool_choice"] = "auto"
             raw = _retry(
                 lambda timeout: self._client_v1.chat.completions.create(**chat_kwargs, timeout=timeout),
-                max_attempts=10,
+                max_attempts=_attempts,
                 timeout_seq=_timeout_seq,
             )
             if extra.get("stream"):
@@ -830,10 +833,11 @@ class AnthropicClient:
         # 必须通过 SDK 的 extra_body 参数传给请求体，不能展开成顶层 kwarg，
         # 否则 reasoning_effort 等扩展字段会被当作 create() 的非法关键字参数。
 
-        _timeout_seq = [10.0] * 5 + [15.0] * 5
+        # 摘要等辅助调用可通过 kwargs 传 retry_timeout_seq 收敛重试（理由同 OpenAIClient）
+        _timeout_seq = kwargs.pop("retry_timeout_seq", None) or [10.0] * 5 + [15.0] * 5
         raw = _retry(
             lambda timeout: self._client.messages.create(**create_kwargs, extra_body=extra_body, timeout=timeout),
-            max_attempts=10,
+            max_attempts=len(_timeout_seq),
             timeout_seq=_timeout_seq,
         )
 

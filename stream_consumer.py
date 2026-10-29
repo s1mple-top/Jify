@@ -16,6 +16,7 @@ import time
 from typing import Any, Dict, Optional
 
 from tools.call_context import CallContext, set_call_context, reset_call_context
+from event_bus import event_bus, UIEvent
 
 
 def _is_timeout_error(exc: BaseException) -> bool:
@@ -72,6 +73,9 @@ class BaseStreamConsumer:
         tool_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
         self._reset_stream_state()
+        # 本轮流读取错误（stall / 断流等），供 agent_loop 区分「模型自然结束」
+        # 与「流出错被吞后返回空」——后者若当正常完成，长任务会静默终止
+        self.last_stream_error: Optional[Exception] = None
 
         try:
             _chunk_iter = iter(response)
@@ -81,23 +85,40 @@ class BaseStreamConsumer:
         stream_error: Optional[Exception] = None
         last_seen_idx = -1
         _last_chunk_time = time.monotonic()
+        _first_chunk_done = False
         try:
             for chunk in _chunk_iter:
                 stall = self._stall_timeout()
                 if stall is not None:
                     now = time.monotonic()
+                    # 首 chunk 前的等待是服务端 prefill（压缩/长历史下常超 15s，
+                    # 且前缀缓存失效时必然全量 prefill），不应按「流停滞」误杀；
+                    # 收到首个 payload 后才恢复严格的中途停滞检测
+                    if not _first_chunk_done:
+                        _ft = self._first_chunk_stall_timeout()
+                        if _ft is not None:
+                            stall = max(stall, _ft)
                     if now - _last_chunk_time > stall:
                         raise TimeoutError(
-                            f"LLM 流式响应停滞 {stall}s 无数据，"
+                            f"LLM 流式响应停滞 {stall}s 无有效数据，"
                             "API 服务端可能已静默断开连接"
                         )
-                    _last_chunk_time = now
 
                 from tools.approval import break_requested  # sys 缓存
                 if interrupt_event is not None and interrupt_event.is_set():
                     break
                 if break_requested.is_set():  # 审批选择 break 传递信号到此直接 break 掉
                     break
+
+                if (chunk.content or chunk.thinking or chunk.tool_call_deltas
+                        or chunk.finish_reason
+                        or getattr(chunk, "thinking_signature", "")
+                        or getattr(chunk, "thinking_redacted", "")):
+                    _first_chunk_done = True
+                    # 活动时间只由 payload chunk 刷新：网关 prefill 大上下文期间
+                    # 发送的 SSE 心跳（空 chunk）不能绕过停滞检测，否则流可被
+                    # 无限期维持（表现为压缩完成后 loop 永久卡死）
+                    _last_chunk_time = time.monotonic()
 
                 if chunk.content:
                     complete_text += chunk.content
@@ -166,7 +187,10 @@ class BaseStreamConsumer:
         self._post_stream()
 
         from tools.approval import break_requested
-        if not break_requested.is_set():
+        # 流出错（stall / 断流）时不再 fire 剩余工具：此时 tool_call 的 arguments
+        # 可能只收到半截，json 解析降级为 {}，fire 出去等于用空参数执行工具
+        # （实测 exec 收到 '{"command": "rm -rf' 被解析成 {} 后照常执行）。
+        if not break_requested.is_set() and stream_error is None:
             for cidx in list(tool_call_chunks.keys()):
                 if cidx not in _fired_indices:
                     self._fire_tool(cidx, tool_call_chunks, pending_futures,
@@ -174,7 +198,8 @@ class BaseStreamConsumer:
                                     tc_names, tc_args, tc_id_to_idx, fire_ctxs)
                     _fired_indices.add(cidx)
 
-        _aborted = ((interrupt_event is not None and interrupt_event.is_set())
+        _aborted = (stream_error is not None
+                    or (interrupt_event is not None and interrupt_event.is_set())
                     or break_requested.is_set())
         for tc_id, future in pending_futures.items():
             if tc_id in pre_results:
@@ -195,6 +220,7 @@ class BaseStreamConsumer:
 
         tool_executor.shutdown(wait=False)
 
+        self.last_stream_error = stream_error
         self._finalize_stream(stream_error)
 
         return complete_text, tool_call_chunks, finish_reason, pre_results
@@ -252,6 +278,19 @@ class BaseStreamConsumer:
         pass
 
     def _stall_timeout(self) -> Optional[float]:
+        return None
+
+    def notify(self, message: str) -> None:
+        """运行期进度/状态提示（压缩等同步长耗时操作）。
+
+        默认走 event_bus（WebUI 有常驻 drain_loop，实时可见）；CLI 运行期
+        没有 event_bus 消费者（chat() 起始即 stop_p2p_listener），需覆写为
+        直接打印，否则提示会积压到下一轮流开始才批量刷出，用户全程看不到。
+        """
+        event_bus.put(UIEvent("MESSAGE", message))
+
+    def _first_chunk_stall_timeout(self) -> Optional[float]:
+        """首 chunk 前的宽限阈值（服务端 prefill 阶段）。None = 与 stall 一致。"""
         return None
 
     def _on_content(self, text: str) -> None:

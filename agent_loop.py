@@ -83,6 +83,7 @@ class AgentConfig:
     summary_chunk_chars: int = 60000  # 摘要分段压缩的单块字符上限，防止摘要请求自身超窗
     summary_parallel_workers: int = 2  # 分段摘要并行度（1 = 串行），兼顾限流风险与折叠延迟
     summary_model: str = ""  # 独立摘要模型（空 = 用主模型），可指向便宜大窗模型
+    summary_timeout: float = 90.0  # 摘要单次请求超时（秒），2 次重试；过大导致压缩阶段长时间无响应
     models: List[ModelConfig] = field(default_factory=list)  # 多模型配置列表
     active_model_name: Optional[str] = None  # 当前激活的模型配置名，None 表示 config.yaml 首个默认
 
@@ -161,6 +162,7 @@ class AgentConfig:
             summary_chunk_chars=raw.get("summary_chunk_chars", defaults.summary_chunk_chars),
             summary_parallel_workers=raw.get("summary_parallel_workers", defaults.summary_parallel_workers),
             summary_model=raw.get("summary_model", defaults.summary_model),
+            summary_timeout=raw.get("summary_timeout", defaults.summary_timeout),
             models=models,
         )
 
@@ -431,6 +433,7 @@ class AgentLoop:
         self._last_api_error: Optional[str] = None
         self._emergency_count: int = 0  # 本轮紧急压缩累计次数，run() 开始时复位（见 emergency_compress_limit）
         self._turn_start_idx: int = 0  # 本轮新增消息的起始索引（折叠前缀时保留尾部）
+        self._turn_archived: bool = True  # 本轮消息是否已归档进 _session_messages（True=无待归档）
         # 轮内迭代折叠状态（路径 C）：迭代块结束边界 + 运行时保留窗口（可动态收缩）
         # 边界缓冲区独立于 _iter_keep：水位折叠需要按块粒度选择折叠终点，
         # 若只留 keep+1 个边界则退化为「一次折叠到底」，故给足上限（超出后早期
@@ -444,6 +447,7 @@ class AgentLoop:
         self._summary_fail_streak: int = 0
         self._summary_cooldown_until: float = 0.0
         self._active_turn_transcript: Optional[List[Dict]] = None  # run() 本轮 transcript 引用
+        self._console: Any = None  # 本轮 console 引用（压缩进度实时回报用）
 
         # 活跃流引用：ESC 中断时关闭底层 HTTP 连接
         self._active_stream: Any = None
@@ -475,6 +479,12 @@ class AgentLoop:
         self._interrupt_event.clear()
         self._last_api_error = None
         self.ctx = ContextManager(summarizer=self._summarize)
+        self._turn_archived = True
+        # 摘要熔断状态一并重置：/clear 是用户明确的"重来"信号，
+        # 保留冷却期会让清空后的首次压缩直接跳过 LLM 走规则兜底
+        with self._summary_lock:
+            self._summary_fail_streak = 0
+            self._summary_cooldown_until = 0.0
         with self._session_messages_lock:
             self._session_messages.clear()
 
@@ -512,7 +522,11 @@ class AgentLoop:
             messages = list(self._session_messages)
 
         if not messages:
-            return None
+            # 兜底：异常路径可能跳过归档（_session_messages 为空），回退到内存中
+            # 的完整消息序列（resume 历史 + 本轮），避免整轮对话丢失且无法 /resume
+            messages = [m for m in self.messages if m.role != "system"]
+            if not messages:
+                return None
 
         raw = []
         for m in messages:
@@ -548,6 +562,22 @@ class AgentLoop:
         with self._session_messages_lock:
             self._session_messages.clear()
         return self._session_id
+
+    def _archive_current_turn(self) -> None:
+        """把本轮新增消息归档进 _session_messages（幂等，每轮至多归档一次）。
+
+        正常完成 / 异常收尾路径各调用一次，run() 的 finally 再兜底一次：
+        Ctrl+C 硬中断会直接展开调用栈、跳过收尾路径的归档代码，若不补救，
+        _session_messages 为空 → save_conversation 返回 None → /exit 后
+        无法生成 /resume 会话，整轮对话丢失。
+        """
+        if self._turn_archived:
+            return
+        self._turn_archived = True
+        with self._session_messages_lock:
+            self._session_messages.extend(
+                [m for m in self.messages[self._turn_start_idx:] if m.role != "system"]
+            )
 
     def load_conversation(self, session_id: str) -> List[Message]:
         """从 SQLite 加载会话消息，返回 Message 列表并存入 _resume_messages。
@@ -629,7 +659,17 @@ class AgentLoop:
             self.messages = repaired
             logger.warning("repaired %d dangling tool_calls from interrupted turn", missing_total)
 
-    def run(self, message_id: str, user_message: str, system_prompt: str, console, tool_schemas,
+    def run(self, message_id: str, user_message: str, system_prompt: str, console,
+            tool_schemas, initial_messages: Optional[List[Message]] = None) -> Dict[str, Any]:
+        """run 入口：无论以何种方式退出（正常 / API 错误 / Ctrl+C 硬中断 / 任意异常），
+        都保证本轮消息归档进 _session_messages，否则 /exit 后无法 /resume。"""
+        try:
+            return self._run_impl(message_id, user_message, system_prompt,
+                                  console, tool_schemas, initial_messages)
+        finally:
+            self._archive_current_turn()
+
+    def _run_impl(self, message_id: str, user_message: str, system_prompt: str, console, tool_schemas,
             initial_messages: Optional[List[Message]] = None) -> Dict[str, Any]:
         """
         启动一轮 Agent 对话
@@ -679,6 +719,10 @@ class AgentLoop:
         # 本轮的原始用户消息（不含历史拼接），供 ctx.end_turn 记录
         raw_user_message = user_message
 
+        # 持有 console 引用：压缩等长耗时同步操作需要实时回报进度
+        # （CLI 运行期无 event_bus 消费者，走总线会看不到）
+        self._console = console
+
         # 本轮 transcript，供 ctx.end_turn 记录
         _turn_transcript: List[Dict] = [{"role": "user", "content": user_message}]
 
@@ -700,6 +744,9 @@ class AgentLoop:
 
         # 本轮起始索引 = 本轮 user 消息所在下标（折叠时保留「本轮 user + assistant + tool」）
         self._turn_start_idx = len(self.messages) - 1
+        # 归档标志在本轮起点复位；若在此之前的早期阶段被中断，标志仍为上轮的
+        # True，run() finally 的兜底归档 no-op，不会把上轮消息重复归档
+        self._turn_archived = False
         # 轮内迭代折叠状态重置：新轮从零开始记录迭代块边界
         self._iter_block_ends.clear()
         self._iter_keep = self.config.iteration_keep_window
@@ -760,7 +807,7 @@ class AgentLoop:
                 if (self._emergency_count < self.config.emergency_compress_limit
                         and self._looks_like_context_overflow(e)):
                     self._emergency_count += 1
-                    event_bus.put(UIEvent("MESSAGE", "[上下文溢出] 正在调用模型压缩上下文..."))
+                    self._notify("[上下文溢出] 正在调用模型压缩上下文...")
                     self._emergency_compress(user_message)
                     continue
                 self._last_api_error = str(e)
@@ -788,6 +835,33 @@ class AgentLoop:
             # 组装 tool_calls 并解析文本
             tool_calls = self._assemble_tool_calls(tool_call_chunks)
             text_content = self._extract_text_from_content(complete_text)
+
+            # 流读取错误（stall / 服务端断流）被 consume_stream 吞掉后会返回
+            # 空或不完整的 tool_calls。判据必须看 finish_reason 而不是「有没有
+            # tool_calls」：流中途断掉时 tool_calls 可能已吐出大半，arguments 却是
+            # 截断的 json（解析降级为 {}），拿去执行等于用空参数调用工具。
+            # 只有 finish_reason 表明模型正常结束，才能认为 tool_calls 完整。
+            _stream_error = getattr(console, "last_stream_error", None)
+            _stream_complete = finish_reason in (
+                "tool_calls", "stop", "length", "content_filter", "pause_turn")
+            if (_stream_error is not None and not _stream_complete
+                    and not self._interrupt_requested):
+                if (self._emergency_count < self.config.emergency_compress_limit
+                        and self._looks_like_context_overflow(_stream_error)):
+                    self._emergency_count += 1
+                    self._notify("[上下文溢出] 正在调用模型压缩上下文...")
+                    self._emergency_compress(user_message)
+                    continue
+                self._last_api_error = str(_stream_error)
+                friendly = format_api_error(_stream_error)
+                # 半截文本不能当最终回复（会误导为正常产出），清空走错误收尾
+                text_content = ""
+                try:
+                    console.report_api_error(friendly)
+                except Exception:
+                    pass
+                event_bus.put(UIEvent("ERROR", friendly))
+                break
 
             # 无 tool_calls → 结束
             if not tool_calls:
@@ -833,10 +907,7 @@ class AgentLoop:
                 #                                   len(self.ctx.get_session_summary())) + "\r\n"))
                 console.stream_end()
                 # 持久化本轮完整消息（只追加本轮新增，避免重复）
-                with self._session_messages_lock:
-                    self._session_messages.extend(
-                        [m for m in self.messages[self._turn_start_idx:] if m.role != "system"]
-                    )
+                self._archive_current_turn()
                 # append-only：messages 序列保留，供下轮继续追加（前缀缓存友好）
 
                 reset_agent_config(_config_token)
@@ -855,7 +926,7 @@ class AgentLoop:
             from tools.approval import break_requested
             if break_requested.is_set():
                 break_requested.clear()
-                event_bus.put(UIEvent("MESSAGE", "[审批] 用户终止当前任务。"))
+                self._notify("[审批] 用户终止当前任务。")
                 # 审批打断不设 is_interrupted，避免产生 TaskCheckpoint 快照
                 final_msg = "任务已被用户中断 (break)。"
                 break
@@ -937,12 +1008,9 @@ class AgentLoop:
         self.ctx.end_turn(raw_user_message, final_msg,
                          transcript=_turn_transcript,
                          start_idx=self._turn_start_idx)
-        event_bus.put(UIEvent("MESSAGE", final_msg))
+        self._notify(final_msg)
         # 持久化本轮完整消息（只追加本轮新增，避免重复）
-        with self._session_messages_lock:
-            self._session_messages.extend(
-                [m for m in self.messages[self._turn_start_idx:] if m.role != "system"]
-            )
+        self._archive_current_turn()
         # append-only：messages 序列保留
         reset_agent_config(_config_token)
         elapsed = time.time() - run_start
@@ -1298,22 +1366,57 @@ class AgentLoop:
 
         连续失败达上限后进入冷却期：期间直接返回空串，由调用方走规则兜底，
         避免长任务里每次折叠都等一次超时。冷却结束自动放行一次探活。
+
+        可中断性：摘要调用 stream=False，不写 self._active_stream，interrupt()
+        的 close() 对它无效——长任务里上下文一超阈值就会同步调它，若服务端
+        不返回，主线程会卡死在压缩阶段（表现为「loop 停住、没有请求发出、
+        Ctrl+C 也退不出来」，只有 /clear 清空消息后才恢复）。故改为在后台
+        线程发起请求，主线程只做可中断的等待：中断信号一来立即返回空串，
+        由调用方走规则兜底（质量降级但任务不死）。
         """
         if self._summary_fail_streak >= self._SUMMARY_FAIL_LIMIT \
                 and time.time() < self._summary_cooldown_until:
             return ""
-        try:
-            msgs = [{"role": "user", "content": prompt}]
-            resp = self.model_client.chat(
-                messages=msgs,
-                tool_schemas=[],
-                model=self.config.summary_model or self.config.model,
-                stream=False,
-            )
-            text = resp.content or ""
-        except Exception:
-            self._record_summary_failure()
+        # 软中断：摘要属于旁路辅助调用，用户请求打断时不再发起新的模型请求
+        if self._interrupt_event.is_set():
             return ""
+
+        box: Dict[str, Any] = {}
+
+        def _call():
+            try:
+                box["resp"] = self.model_client.chat(
+                    messages=[{"role": "user", "content": prompt}],
+                    tool_schemas=[],
+                    model=self.config.summary_model or self.config.model,
+                    stream=False,
+                    # 摘要有规则兜底 + 熔断，超时按配置（默认 2 × 90s）：
+                    # 原先 3 × 240s 意味着单次失败最多占用 12 分钟主线程，
+                    # 用户侧表现为彻底卡死
+                    retry_timeout_seq=(float(self.config.summary_timeout),) * 2,
+                )
+            except BaseException as e:  # noqa: BLE001 - 后台线程：任何异常都不能逃逸
+                box["err"] = e
+
+        worker = threading.Thread(target=_call, daemon=True)
+        worker.start()
+        # 可中断等待：轮询中断信号，避免 Ctrl+C 后仍被摘要请求挂住
+        while worker.is_alive():
+            if self._interrupt_event.is_set():
+                self._record_summary_failure()
+                return ""
+            worker.join(timeout=0.2)
+
+        # Ctrl+C 可能直接打断 start/join 之间的等待，此时 worker 仍活着
+        if "err" in box:
+            err = box["err"]
+            self._record_summary_failure()
+            # 键盘中断属于用户主动行为，计失败（触发熔断避免反复卡）后原样上抛
+            if isinstance(err, KeyboardInterrupt):
+                raise err
+            return ""
+        resp = box.get("resp")
+        text = getattr(resp, "content", "") or ""
         if not text:
             self._record_summary_failure()
             return ""
@@ -1385,14 +1488,29 @@ class AgentLoop:
         387K 折叠 7 块即 7 次串行等待）。并发度由 summary_parallel_workers 控制，
         为 1 时退回串行。_summarize 内部已吞掉异常并返回空串，故并发不引入
         map 侧的异常传播；熔断计数由 _summary_lock 串行化，行为与串行一致。
+
+        每完成一块通过 event_bus 报进度：大上下文折叠是同步 LLM 调用（单块
+        可达分钟级），无进度反馈时用户无法区分「正在压缩」与「卡死」。
         """
         workers = min(max(int(self.config.summary_parallel_workers or 1), 1), len(chunks))
         if workers <= 1:
-            return [self._summarize(prefix + c) for c in chunks]
+            out = []
+            for i, c in enumerate(chunks, 1):
+                out.append(self._summarize(prefix + c))
+                self._notify(f"[compact] 摘要进度 {i}/{len(chunks)}")
+            return out
         # 预热 client：lru_cache 不做 single-flight，并发首次创建会重复构造客户端
         self.model_client
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            return list(pool.map(lambda c: self._summarize(prefix + c), chunks))
+            futures = {pool.submit(self._summarize, prefix + c): i
+                       for i, c in enumerate(chunks)}
+            out: List[str] = [""] * len(chunks)
+            done = 0
+            for fut in concurrent.futures.as_completed(futures):
+                out[futures[fut]] = fut.result()
+                done += 1
+                self._notify(f"[compact] 摘要进度 {done}/{len(chunks)}")
+            return out
 
     def _summary_total_cap(self) -> int:
         """摘要总量上限：与压缩阈值挂钩（阈值的 1/2，夹在 [2K, 120K]）。"""
@@ -1449,6 +1567,38 @@ class AgentLoop:
             lines.append(f"[工具调用] {name}")
         return "\n".join(lines)
 
+    def _notify(self, message: str) -> None:
+        """运行期进度提示（压缩等同步长耗时操作）。
+
+        走 console.notify 而非直接 event_bus：CLI 在 run 期间没有 event_bus
+        消费者，事件会积压到下一轮流开始才批量刷出，用户全程看不到进度，
+        只能感受到「卡住不动」。
+        """
+        console = getattr(self, "_console", None)
+        if console is not None and hasattr(console, "notify"):
+            try:
+                console.notify(message)
+                return
+            except Exception:
+                pass
+        event_bus.put(UIEvent("MESSAGE", message))
+
+    def _set_phase(self, phase: str) -> None:
+        """同步状态栏 phase（如 compressing）；console 不支持时静默跳过。
+
+        CLIConsole 经 property 转发到 OutputEngine.model_phase，动画线程每帧
+        读取渲染；ws_console 为同名实例属性。压缩是同步阻塞操作（LLM 摘要
+        可达数十秒），期间不设 phase 会一直停留在 idle（显示 offline），
+        用户无法区分「正在压缩」与「卡死」。
+        """
+        console = getattr(self, "_console", None)
+        if console is None:
+            return
+        try:
+            setattr(console, "_model_phase", phase)
+        except Exception:
+            pass
+
     def _maybe_compact_prefix(self, preserve_current: bool = False) -> None:
         """上下文超阈值时折叠前缀历史。
 
@@ -1461,7 +1611,62 @@ class AgentLoop:
         """
         _total_chars = sum(len(str(m)) for m in self.messages)
         if _total_chars > self.config.context_compress_threshold:
-            self._compact_prefix(self._turn_start_idx, preserve_current=preserve_current)
+            self._set_phase("compressing")
+            try:
+                self._compact_prefix(self._turn_start_idx, preserve_current=preserve_current)
+            except KeyboardInterrupt:
+                # 用户 Ctrl+C 打断了压缩。必须在这里就把上下文压下去：
+                # 否则 messages 仍超阈值，用户重新提问时 run() 会再次触发压缩，
+                # 又卡在同一个不响应的摘要请求上（表现为「重发依然无响应，
+                # 只有 /clear 才恢复」）。规则截断是确定性的、不依赖网络，
+                # 保证本轮一定收敛；随后照常把中断向上抛，回到输入框。
+                self._trip_summary_breaker()
+                self._force_rule_fold()
+                raise
+            finally:
+                self._set_phase("idle")
+
+    def _trip_summary_breaker(self) -> None:
+        """立即打开摘要熔断：用户已放弃本次压缩，说明摘要通道不可用。
+
+        后续折叠在冷却窗口内直接走规则截断，不再阻塞主线程等一次可能
+        永不返回的 LLM 请求。
+        """
+        with self._summary_lock:
+            self._summary_fail_streak = max(
+                self._summary_fail_streak, self._SUMMARY_FAIL_LIMIT)
+            self._summary_cooldown_until = time.time() + self._summary_cooldown_sec(
+                self._SUMMARY_FAIL_LIMIT + 2)
+
+    def _force_rule_fold(self) -> None:
+        """压缩被中断时的强制收敛：用规则截断把上下文压到阈值以下。
+
+        只保留 system + 规则摘要 + 本轮 user 原文，天然满足消息协议
+        （不含悬空的 assistant(tool_calls)），让下一轮不再触发压缩。
+        质量低于 LLM 摘要，但保证任务能继续——中断后必须可用。
+        """
+        head = [m for m in self.messages if m.role == "system"]
+        body = [m for m in self.messages if m.role != "system"]
+        keep_user = None
+        idx = self._turn_start_idx
+        if 0 <= idx < len(self.messages) and self.messages[idx].role == "user":
+            keep_user = self.messages[idx]
+
+        text = "\n\n".join(f"[{m.role}] {m.content}" for m in body if m.content)
+        folded = self._rule_based_fold(text) if text else ""
+        if not folded:
+            return
+
+        self.ctx.session_summary = folded
+        self.ctx._pending_compress.clear()
+        new_msgs = head + [Message(role="user", content="=== 历史摘要 ===\n" + folded)]
+        if keep_user is not None:
+            new_msgs.append(keep_user)
+        self.messages = new_msgs
+        self._iter_block_ends.clear()
+        self._turn_start_idx = len(head) + 1
+        logger.warning("compact interrupted by user, force rule fold: %d -> %d chars",
+                       sum(len(str(m)) for m in body), len(folded))
 
     def _compact_prefix(self, turn_start_idx: int, preserve_current: bool = False) -> None:
         """超阈值折叠前缀，置于序列前端。分两条路径：
@@ -1497,6 +1702,8 @@ class AgentLoop:
                     return
                 # 只压本轮之前的历史，保留本轮 user 原文
                 history = self.messages[len(head):turn_start_idx]
+                self._notify(f"[compact] 正在压缩历史上下文（{len(history)} 条消息，"
+                             "同步调用模型，可能需要数十秒）...")
                 folded = self._summarize_messages(history)
                 if not folded:
                     return
@@ -1517,6 +1724,8 @@ class AgentLoop:
                 return
             # 全量压缩「全部上下文（含本轮）」，直接把摘要替换进正文后继续处理。
             # 本轮 user 原文必须原样保留：它是任务指令锚点，摘要化会导致长任务跑偏
+            self._notify(f"[compact] 正在全量压缩上下文（{len(self.messages)} 条消息，"
+                         "同步调用模型，可能需要数十秒）...")
             summary = self._summarize_messages(self.messages)
             if not summary:
                 return
@@ -1551,6 +1760,8 @@ class AgentLoop:
                 self._fold_current_turn(head)
                 return
             fold_msgs = self.messages[fold_start:turn_start_idx]
+            self._notify(f"[compact] 正在压缩历史上下文（{len(fold_msgs)} 条消息，"
+                         "同步调用模型，可能需要数十秒）...")
             merged = self._merge_summary(summary, fold_msgs)
             if not merged:
                 return
@@ -1626,6 +1837,8 @@ class AgentLoop:
             return False  # 本轮 user 之后无完整迭代块
 
         fold_msgs = self.messages[turn_start_idx + 1: fold_end]
+        self._notify(f"[compact] 轮内迭代折叠：压缩 {len(fold_msgs)} 条早期消息"
+                     "（同步调用模型，可能需要数十秒）...")
         summary = self.ctx.get_session_summary()
         if summary:
             merged = self._merge_summary(summary, fold_msgs)
@@ -1717,18 +1930,22 @@ class AgentLoop:
         仍超阈值（如巨型单条消息撑爆、无块可压）时，退回原有行为：全量压缩
         本轮起始点之前的全部历史，仅保留本轮新增尾部，避免丢掉当前进度。
         """
-        self._maybe_compact_prefix()
-        if sum(len(str(m)) for m in self.messages) < self.config.context_compress_threshold:
-            return
+        self._set_phase("compressing")
+        try:
+            self._maybe_compact_prefix()
+            if sum(len(str(m)) for m in self.messages) < self.config.context_compress_threshold:
+                return
 
-        turn_start_idx = self._turn_start_idx
-        result = self._summarize_messages(self.messages[:turn_start_idx])
+            turn_start_idx = self._turn_start_idx
+            result = self._summarize_messages(self.messages[:turn_start_idx])
 
-        if result:
-            self.ctx.session_summary = result
-            # 全量压缩已覆盖历史，清空待压缩缓冲避免重复折叠
-            self.ctx._pending_compress.clear()
-            self._compact_prefix(turn_start_idx)
+            if result:
+                self.ctx.session_summary = result
+                # 全量压缩已覆盖历史，清空待压缩缓冲避免重复折叠
+                self.ctx._pending_compress.clear()
+                self._compact_prefix(turn_start_idx)
+        finally:
+            self._set_phase("idle")
 
     @staticmethod
     def _looks_like_context_overflow(error: Exception) -> bool:
