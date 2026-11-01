@@ -12,6 +12,7 @@ Schema:
 import sqlite3
 import json
 import uuid
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -30,7 +31,7 @@ class ConversationDB:
 
     # 初始化
     def _init_tables(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS sessions (
                     id            TEXT PRIMARY KEY,
@@ -68,7 +69,7 @@ class ConversationDB:
         """创建新会话，返回 session_id"""
         session_id = uuid.uuid4().hex[:8]
         now = datetime.now().isoformat()
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
             conn.execute(
                 "INSERT INTO sessions (id, created_at, jify_name, model) "
                 "VALUES (?, ?, ?, ?)",
@@ -79,7 +80,7 @@ class ConversationDB:
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """获取会话元信息"""
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
             row = conn.execute(
                 "SELECT id, created_at, ended_at, jify_name, model, message_count "
                 "FROM sessions WHERE id = ?",
@@ -98,7 +99,7 @@ class ConversationDB:
 
     def list_sessions(self, limit: int = 20) -> List[Dict[str, Any]]:
         """列出最近会话"""
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
             rows = conn.execute(
                 "SELECT id, created_at, ended_at, jify_name, model, message_count "
                 "FROM sessions ORDER BY created_at DESC LIMIT ?",
@@ -119,7 +120,7 @@ class ConversationDB:
     def close_session(self, session_id: str) -> None:
         """标记会话结束时间"""
         now = datetime.now().isoformat()
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
             conn.execute(
                 "UPDATE sessions SET ended_at = ? WHERE id = ?",
                 (now, session_id),
@@ -141,7 +142,7 @@ class ConversationDB:
         messages 格式: [{"role", "content", "tool_calls"?, "tool_call_id"?, "reasoning_content"?}, ...]
         """
         now = datetime.now().isoformat()
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
             # 更新或创建 session
             conn.execute(
                 "INSERT INTO sessions (id, created_at, ended_at, jify_name, model, message_count) "
@@ -176,7 +177,7 @@ class ConversationDB:
 
     def load_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """加载会话的所有消息，按 seq 排序"""
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
             rows = conn.execute(
                 "SELECT role, content, tool_calls, tool_call_id, reasoning_content "
                 "FROM messages WHERE session_id = ? ORDER BY seq",

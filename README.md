@@ -38,6 +38,9 @@ https://github.com/user-attachments/assets/68095fbc-9af2-4019-b8d9-512a754b2d6d
 | ----------------- | -------------- | ------------------------------------------------------------ |
 | CVE-2026-105237   | litemall       | 由 Jify 发掘并验证 / Discovered and validated by Jify        |
 | CVE-2026-108923   | smart-admin    | `/support/config/queryByKey` 接口权限设置不当，可通过 `configKey` 读取 superadmin 密码，导致垂直越权（CWE-284/CWE-266），由 Jify 发掘并验证 / Improper permission on `/support/config/queryByKey` leaks superadmin credentials, leading to vertical privilege escalation (CWE-284/CWE-266), discovered and validated by Jify |
+| CVE-2025-2855     | eladmin 2.7    | 远程代码执行（RCE），由 Jify 发掘并验证 / Remote Code Execution (RCE), discovered and validated by Jify |
+| CVE-2025-2835     | oneblog 2.3.9  | 服务端请求伪造（SSRF），由 Jify 发掘并验证 / Server-Side Request Forgery (SSRF), discovered and validated by Jify |
+| CVE-2025-2833     | oneblog 2.3.9  | 正则表达式拒绝服务（ReDoS），由 Jify 发掘并验证 / Regular Expression Denial of Service (ReDoS), discovered and validated by Jify |
 
 ## 安装 / Installation
 

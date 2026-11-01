@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jify"
-version = "0.3.0"
+version = "0.3.1"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=0.109.1",
@@ -25,7 +25,7 @@ jify = "cli.app:main"
 
 [tool.setuptools]
 py-modules = [
-    "agent_loop", "agent_p2p", "context_manager",
+    "agent_loop", "agent_p2p", "context_manager", "context_shed",
     "event_bus", "experience_extractor",
     "jify_tool", "long_term_memory", "model_client",
     "output_engine", "self_evolution", "skill_detector",

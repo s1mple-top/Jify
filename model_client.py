@@ -685,7 +685,7 @@ def get_anthropic_client(api_key: Optional[str] = None,
 
 class AnthropicClient:
     """
-    Anthropic Claude API 客户端。
+    Anthropic Messages API 客户端。
 
     所有参数均可通过环境变量覆盖，优先从配置拿：
         ANTHROPIC_API_KEY
@@ -867,8 +867,9 @@ _MODEL_MAX_OUTPUT = (
     ("claude-3-sonnet", 4096),
     ("claude-3-haiku", 4096),
 )
-# 未知模型取保守值，避免撞上 4k 上限的旧模型
-_DEFAULT_MAX_OUTPUT = 8192
+# 未知模型取宽松默认值：主流第三方 anthropic 兼容中转（deepseek/glm/kimi 等）
+# 输出上限普遍 >= 64K，取 8192 会在长 thinking 时被 finish_reason=length 静默截断
+_DEFAULT_MAX_OUTPUT = 65536
 
 
 def _model_max_output(model: str) -> int:

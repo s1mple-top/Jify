@@ -152,50 +152,52 @@ class ContextManager:
         for t in self._pending_compress:
             t.start_idx += shift
 
-    def flush_pending_sync(self) -> bool:
-        """同步把待压缩轮次折叠进 session_summary。
-
-        供 agent_loop 在**前缀折叠前**调用，确保 session_summary 覆盖到折叠边界，
-        避免出现「既不在摘要、又被折叠掉」的内容缺口。仅在确实有 pending 时才调 LLM。
-
-        Returns:
-            True 表示 pending 已成功折叠（或本就为空），session_summary 已覆盖折叠边界；
-            False 表示 LLM 摘要失败，pending 未折叠，调用方需重试或降级全量压缩。
-        """
-        if not self.summarizer:
-            return True
-        with self._summary_lock:
-            turns = list(self._pending_compress)
-            if not turns:
-                return True
-            new_turns_text = "\n\n".join(self._format_turn(t) for t in turns)
-            current_summary = self.session_summary
-            if current_summary:
-                prompt = (
-                    "以下是之前对话的摘要，请严格保留其全部内容，"
-                    "只能追加、不能删除或修改已有摘要中的任何内容：\n\n"
-                    f"{current_summary}\n\n"
-                    "以下是新的对话轮次，请将其中的用户意图、关键结果、"
-                    "主要进展、正在进行还未完成的工作追加整合到摘要末尾：\n\n"
-                    f"{new_turns_text}"
-                )
-            else:
-                prompt = (
-                    "请总结以下对话轮次中的用户意图、关键结果和主要进展，"
-                    "要求尽可能简洁但保留核心：\n\n"
-                    f"{new_turns_text}"
-                )
-            try:
-                result = self.summarizer(prompt)
-            except Exception:
-                return False
-            if not result:
-                return False
-            self.session_summary = result
-            self._pending_compress = [
-                t for t in self._pending_compress if t not in turns
-            ]
-            return True
+    # 已废弃：由后台增量压缩（end_turn/_do_incremental_compress）与前缀替换
+    # （agent_loop._compact_prefix）共同取代，当前无任何调用者。保留代码供回溯。
+    # def flush_pending_sync(self) -> bool:
+    #     """同步把待压缩轮次折叠进 session_summary。
+    #
+    #     供 agent_loop 在**前缀折叠前**调用，确保 session_summary 覆盖到折叠边界，
+    #     避免出现「既不在摘要、又被折叠掉」的内容缺口。仅在确实有 pending 时才调 LLM。
+    #
+    #     Returns:
+    #         True 表示 pending 已成功折叠（或本就为空），session_summary 已覆盖折叠边界；
+    #         False 表示 LLM 摘要失败，pending 未折叠，调用方需重试或降级全量压缩。
+    #     """
+    #     if not self.summarizer:
+    #         return True
+    #     with self._summary_lock:
+    #         turns = list(self._pending_compress)
+    #         if not turns:
+    #             return True
+    #         new_turns_text = "\n\n".join(self._format_turn(t) for t in turns)
+    #         current_summary = self.session_summary
+    #         if current_summary:
+    #             prompt = (
+    #                 "以下是之前对话的摘要，请严格保留其全部内容，"
+    #                 "只能追加、不能删除或修改已有摘要中的任何内容：\n\n"
+    #                 f"{current_summary}\n\n"
+    #                 "以下是新的对话轮次，请将其中的用户意图、关键结果、"
+    #                 "主要进展、正在进行还未完成的工作追加整合到摘要末尾：\n\n"
+    #                 f"{new_turns_text}"
+    #             )
+    #         else:
+    #             prompt = (
+    #                 "请总结以下对话轮次中的用户意图、关键结果和主要进展，"
+    #                 "要求尽可能简洁但保留核心：\n\n"
+    #                 f"{new_turns_text}"
+    #             )
+    #         try:
+    #             result = self.summarizer(prompt)
+    #         except Exception:
+    #             return False
+    #         if not result:
+    #             return False
+    #         self.session_summary = result
+    #         self._pending_compress = [
+    #             t for t in self._pending_compress if t not in turns
+    #         ]
+    #         return True
 
     # 内部辅助
     @staticmethod

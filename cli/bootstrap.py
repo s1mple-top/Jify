@@ -19,12 +19,6 @@ DEFAULT_CONFIG_YAML = """\
 #     base_url: https://api.openai.com/v1
 #     api_key: "sk-xxx"
 #
-#   - name: claude
-#     provider: anthropic
-#     model: claude-sonnet-4-20250514
-#     base_url: https://api.anthropic.com
-#     api_key: "sk-ant-xxx"
-#
 #   - name: deepseek
 #     provider: anthropic
 #     model: deepseek-v4-pro

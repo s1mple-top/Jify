@@ -43,9 +43,14 @@ def set_approval_engine(engine: OutputEngine) -> None:
 
 
 def set_no_approve(enabled: bool) -> None:
-    """设置免审批模式（启动参数 --no-approve 时调用）。"""
+    """设置免审批模式（启动参数 --no-approve 或 /approve 命令调用）。"""
     global _no_approve
     _no_approve = enabled
+
+
+def is_no_approve() -> bool:
+    """查询当前是否处于免审批模式。"""
+    return _no_approve
 
 
 def set_web_bridge(bridge) -> None:

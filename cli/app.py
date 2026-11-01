@@ -60,6 +60,7 @@ console = JifyTheme.create_console()
 # Slash 命令系统 — 输入 "/" 自动补全
 SLASH_COMMANDS: Dict[str, str] = {
     "model": "切换模型          —  /model <model_name>",
+    "approve": "审批开关          —  /approve <yes|no>",
     "resume": "加载历史对话      —  /resume <session_id>",
     "sessions": "列出最近对话会话  —  /sessions",
     "clear": "清除对话历史      —  /clear",
@@ -100,6 +101,15 @@ class SlashCompleter(Completer):
             if rest.startswith(" "):
                 prefix = rest[1:].lstrip()
                 for name in _get_model_names():
+                    if name.startswith(prefix):
+                        yield Completion(name, start_position=-len(prefix))
+                return
+        # /approve <yes|no> 子命令补全
+        if text.startswith("/approve"):
+            rest = text[len("/approve"):]
+            if rest.startswith(" "):
+                prefix = rest[1:].lstrip()
+                for name in ("yes", "no"):
                     if name.startswith(prefix):
                         yield Completion(name, start_position=-len(prefix))
                 return
@@ -1206,6 +1216,24 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False,
                         meta(f"  已切换模型 → {arg}")
                         meta(f"    provider: {agent_cli.config.provider}")
                         meta(f"    base_url: {agent_cli.config.base_url}")
+                    divider()
+                    continue
+                elif cmd == "approve":
+                    from tools.approval import set_no_approve, is_no_approve
+                    val = arg.strip().lower()
+                    if val == "no":
+                        set_no_approve(True)
+                        meta("  ✓ 已关闭审批（免审批模式，工具直接放行）")
+                        meta("    重新开启: /approve yes")
+                    elif val == "yes":
+                        set_no_approve(False)
+                        meta("  ✓ 已开启审批（工具调用前需确认）")
+                        meta("    重新关闭: /approve no")
+                    else:
+                        state = "关闭（免审批）" if is_no_approve() else "开启"
+                        meta(f"  当前审批: {state}")
+                        meta("  用法: /approve no  关闭审批")
+                        meta("        /approve yes 重新开启")
                     divider()
                     continue
                 elif cmd == "sessions":
