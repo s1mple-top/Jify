@@ -383,6 +383,9 @@ class JifyCLI:
             except Exception as e:
                 reply_container['response'] = f'[处理异常] {e}'
             finally:
+                # 与 chat() 同理：p2p 轮次结束时也要清空事件队列，
+                # 否则积压的 todo_update 会泄漏到下一轮用户对话的首帧
+                self.cli_console.drain_events()
                 self.cli_console.finalize()
                 self.cli_console.start_p2p_listener()
                 self._agent_lock.release()
@@ -452,6 +455,9 @@ class JifyCLI:
             self.cli_console.last_reasoning_content = ""
             self.cli_console._stream_count = 0
             self.cli_console._pending_sent_tokens = 0
+            # 上一轮被中断的 subagent 可能残留统计记录（无消费者 pop），轮次边界统一清掉
+            from subagent import reset_subagent_stats
+            reset_subagent_stats()
 
             # 开始执行的时候暂停监听
             self.cli_console.stop_p2p_listener()
@@ -489,8 +495,11 @@ class JifyCLI:
                     outcome=final_resp[:5000],
                 ))
 
-                self.cli_console.drain_events()
             finally:
+                # 事件队列必须在 finalize 前清空：Ctrl+C 让 agent.run() 抛异常时
+                # 下方 drain 走不到，积压的 todo_update 会留到下一轮首帧被取出，
+                # 表现为「上一轮的 todos 又冒出来」。
+                self.cli_console.drain_events()
                 self.cli_console.finalize()
 
             self.cli_console.start_p2p_listener()

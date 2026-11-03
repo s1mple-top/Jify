@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from tools.registry import register_tool
+from tools.registry import register_tool, _subagent_whitelist
 from tools.skill_paths import SKILL_MD, canonical_skill_name, resolve_skill
 from tools.builtin.skill_experience import render_for_prompt
 from event_bus import UIEvent, event_bus
@@ -70,7 +70,9 @@ def load_skill(skill_name: str) -> str:
     Returns:
         str: [SKILL.md 文件内容, skill 目录的绝对路径]
     """
-    event_bus.put(UIEvent("TEXT", "* preparing load_skill ( " + skill_name + " )"))
+    # subagent/Worker 内部调用不打扰主界面
+    if _subagent_whitelist.get() is None:
+        event_bus.put(UIEvent("TEXT", "* preparing load_skill ( " + skill_name + " )"))
 
     skill_dir = resolve_skill(skill_name)
     if skill_dir is None:

@@ -261,7 +261,8 @@ class CLIConsole(BaseStreamConsumer):
             self._output.stream_buffer = ""
         elif _is_timeout_error(e):
             self._output.queue_output(Text(
-                f"⚠ 流式响应停滞：{self._STREAM_STALL_TIMEOUT}s 未收到数据。\n"
+                f"⚠ 流式响应中断（{type(e).__name__}，已静默 "
+                f"{getattr(self, 'last_stall_seconds', 0.0):.1f}s）：{error_msg}\n"
                 "   API 服务端可能已静默断开连接。\n"
                 "   请检查网络状况后重试，或使用 /clear 清除历史。",
                 style=JifyTheme.RED))
@@ -399,7 +400,8 @@ class CLIConsole(BaseStreamConsumer):
                     f"  ⏻  Done ({tool_uses} tool uses · {OutputEngine.fmt_elapsed(elapsed)}{token_str})",
                     style=JifyTheme.SUBTLE
                 ))
-                self._output.clear_subagent()
+                # 不清 slot：subagent_run 自身 finally 已按 key 回收，
+                # 这里若清全部会把并发运行的其它 subagent 行一起抹掉
                 _sa_name = tc_names.get(tc_id, "subagent_run")
                 _sa_args = tc_args.get(tc_id, {})
                 pre_results[f"{_sa_name}:{json.dumps(_sa_args, sort_keys=True)}"] = data["result"]

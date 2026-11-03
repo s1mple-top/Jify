@@ -76,6 +76,8 @@ class BaseStreamConsumer:
         # 本轮流读取错误（stall / 断流等），供 agent_loop 区分「模型自然结束」
         # 与「流出错被吞后返回空」——后者若当正常完成，长任务会静默终止
         self.last_stream_error: Optional[Exception] = None
+        # 出错时距上一个 payload chunk 的实际静默秒数，供错误提示显示真实耗时
+        self.last_stall_seconds: float = 0.0
 
         try:
             _chunk_iter = iter(response)
@@ -182,6 +184,9 @@ class BaseStreamConsumer:
             raise
         except Exception as e:
             stream_error = e
+            # 抛错时刻距上一个 payload chunk 的真实间隔：是「实际等了多久」的
+            # 唯一准确来源（异常类名不携带秒数，httpx 的 message 里也没有）
+            self.last_stall_seconds = time.monotonic() - _last_chunk_time
             self._handle_stream_error(e, interrupt_event)
 
         self._post_stream()

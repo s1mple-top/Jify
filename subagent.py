@@ -8,11 +8,22 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from tools.registry import registry, _subagent_whitelist
 from tools.call_context import is_cancelled
+from context_shed import persist_large_result, shed_tool_outputs
 
 # 线程级 subagent 统计：由 SubagentRunner.run() 写入，CLI _fire_tool 读取
 _subagent_stats: Dict[int, Dict] = {}
 
 _CANCELLED_RESULT = "[subagent] 任务已被取消，未执行完。"
+
+
+def reset_subagent_stats() -> None:
+    """清空全部 subagent 统计残留。
+
+    正常路径由 CLI 的 _exec_subagent 在跑完后 pop 掉自己那条；但被中断 /
+    走非预执行路径的调用没人消费，会在线程 ident 维度留下死记录。
+    轮次边界（持有 agent_lock，无并发 subagent）调用本函数统一收敛。
+    """
+    _subagent_stats.clear()
 
 
 class SubagentRunner:
@@ -62,6 +73,11 @@ class SubagentRunner:
         tool_uses = 0
         recv_est = 0
         messages: List[Dict] = []
+        # 本线程上一次运行可能残留统计（走非 CLI 预执行路径时无消费者 pop，
+        # 或线程 ident 被复用），先清掉，避免读到上一轮的耗时 / token 数
+        _subagent_stats.pop(threading.get_ident(), None)
+        # 级 0 落盘文件名需要会话标识；subagent 无长期 session，用线程+时刻区分
+        session_id = f"subagent-{threading.get_ident()}-{int(_start)}"
         try:
             messages.append({"role": "system", "content": system_prompt})
             if history:
@@ -203,14 +219,32 @@ class SubagentRunner:
                     result = registry.dispatch(tool_name, tool_args)
                     if on_progress:
                         on_progress("tool_end", {"name": tool_name, "result": result[:200]})
+                    # 级 0 摄入闸门：单条超限即落盘，上下文只留 preview，
+                    # 避免巨型 exec 输出「先进上下文再被压缩」
+                    content = persist_large_result(
+                        session_id,
+                        tool_name,
+                        tc["id"],
+                        result,
+                        getattr(self.config, "tool_result_max_chars", 50000),
+                        getattr(self.config, "tool_result_preview_chars", 2000),
+                    )
                     tool_msg = {
                         "role": "tool",
-                        "content": result,
+                        "content": content,
                         "tool_call_id": tc["id"],
                     }
                     messages.append(tool_msg)
-                    # 每追加一条 tool 结果消息，按原始字符数计入发送量（与主 Agent 一致）
-                    sent_est += len(result)
+                    # 每追加一条 tool 结果消息，按实际进入上下文的字符数计入发送量（与主 Agent 一致）
+                    sent_est += len(content)
+
+                # 级 1 减重：上下文超阈值时清空早期工具结果（零 LLM、零失败风险）。
+                # subagent 生命周期短，不做旁路摘要；require_converge=False 让它
+                # 不受「清完仍超阈值就别动」限制——没有摘要兜底，能清多少算多少。
+                try:
+                    shed_tool_outputs(messages, self.config, require_converge=False)
+                except Exception:
+                    pass
 
                 if on_progress:
                     on_progress("token_update", {"sent": sent_est, "recv": recv_est})

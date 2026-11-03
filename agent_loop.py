@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 from context_manager import ContextManager
 
 from model_client import get_model_client, format_api_error
-from context_shed import persist_large_result, shed_placeholder
+from context_shed import persist_large_result, shed_tool_outputs, SUMMARY_HEADER
 from jify_tool import registry, ToolCall, should_parallel, _MAX_WORKERS
 from tools.registry import set_agent_config, reset_agent_config, accepts_timeout_param
 from tools.call_context import (
@@ -1231,21 +1231,31 @@ class AgentLoop:
         ctxs = [c for _, c in submitted]
 
         aborted = False
-        while True:
-            pending = [i for i, f in enumerate(futures) if not f.done()]
-            if not pending:
-                break
-            if self._interrupt_requested or break_requested.is_set():
-                aborted = True
-                for f in futures:
+        try:
+            while True:
+                pending = [i for i, f in enumerate(futures) if not f.done()]
+                if not pending:
+                    break
+                if self._interrupt_requested or break_requested.is_set():
+                    aborted = True
+                    for f in futures:
+                        f.cancel()
+                    break
+                now = time.time()
+                # 尚未完成的工具全部超时，才结束等待
+                if all(now >= deadlines[i] for i in pending):
+                    break
+                wait_for = min(deadlines[i] - now for i in pending)
+                concurrent.futures.wait(futures, timeout=min(0.2, max(wait_for, 0.01)))
+        except BaseException:
+            # Ctrl+C 会从这里的等待直接抛出，栈展开后走不到下方的 cancel 逻辑，
+            # 未完成工具的线程（subagent / team）会在后台继续跑完。
+            # 必须在逃逸前把取消信号 + killer 发出去。
+            for i, f in enumerate(futures):
+                if not f.done():
                     f.cancel()
-                break
-            now = time.time()
-            # 尚未完成的工具全部超时，才结束等待
-            if all(now >= deadlines[i] for i in pending):
-                break
-            wait_for = min(deadlines[i] - now for i in pending)
-            concurrent.futures.wait(futures, timeout=min(0.2, max(wait_for, 0.01)))
+                    ctxs[i].cancel()
+            raise
 
         # 快照：此刻仍未完成的调用才是真正被放弃的（之后线程可能因资源被杀而返回）
         finished = {i for i, f in enumerate(futures) if f.done()}
@@ -1311,6 +1321,13 @@ class AgentLoop:
             except Exception as e:
                 result = json.dumps({"error": str(e)})
                 tc.error = True
+            except BaseException:
+                # Ctrl+C 等中断：subagent / team 没登记可杀资源，只能靠取消信号
+                # 让它在下一个检查点退出；不 cancel 就会在后台跑完全程。
+                # 必须排在 except Exception 之后：BaseException 是 Exception 的父类，
+                # 放前面会把所有业务异常一并吞掉并向上抛，导致工具错误无法回传给模型。
+                call_ctx.cancel()
+                raise
             else:
                 tc.error = False
             finally:
@@ -1707,7 +1724,7 @@ class AgentLoop:
     # 摘要消息构造（含召回补偿）
     # ------------------------------------------------------------------
 
-    _RECALL_HINT_HEADER = "=== 历史摘要 ==="
+    _RECALL_HINT_HEADER = SUMMARY_HEADER
     # 低于此阈值时不附带召回提示：提示本身约 200 字符，在小阈值配置下
     # 足以把刚压下去的上下文重新顶回阈值以上，压缩元信息的价值不抵成本。
     _RECALL_HINT_MIN_THRESHOLD = 10000
@@ -1785,106 +1802,31 @@ class AgentLoop:
                     self._recent_read_paths.append(str(path))
 
     def _shed_tool_outputs(self, head: List[Message], turn_start_idx: int) -> bool:
-        """级 1 减重：把早期工具结果内容换成占位符（零 LLM 调用）。
+        """级 1 减重：把早期工具结果换成占位符（委托 context_shed 公共实现）。
 
-        设计要点：只改 tool 消息的 `content`，
-        消息本身与 `tool_call_id` 全部保留，因此 assistant(tool_calls) /
-        tool 的配对关系天然不被破坏，不会产生悬空 tool_call。
-
-        与级 2（轮内折叠）的分工：本方法不产生摘要、不丢消息结构，只是把
-        "已经用过的原始输出"换成一句提示。清完仍超阈值才交给摘要路径。
-        收益上优先走这一级：零延迟、零失败风险，且 stream 表保存着原文，
-        session_search 随时可召回。
-
-        **按条数触发，一次清到保留窗口**（而非按水位逐条清）：清空会改变
-        前缀内容、破坏远程前缀缓存，逐条清空的累计代价远高于一次清够。
-        未清空的工具结果不足 trigger_count 条时干脆不动手。
+        主 agent 只需提供「保护尾部」边界（本轮 user 下标），其余判定（阈值、
+        条数触发、收益门槛、收敛门槛）与 subagent / team worker 共用同一套逻辑，
+        避免三处各写一份、行为漂移。
 
         Args:
-            head: system 消息列表（固定保留）
-            turn_start_idx: 本轮 user 原文下标（其后内容不清理，保留工作现场）
+            head: system 消息列表（公共函数内部自行跳过，此处仅为签名兼容）
+            turn_start_idx: 本轮 user 原文下标，其后内容不清理（保留工作现场）
 
         Returns:
-            True 表示确实清空了一批内容（调用方不必再走摘要）；False 表示
-            内容不够触发、或清完仍超阈值（后者留给级 2 折叠）。
+            True 表示确实清空了一批内容。
         """
-        if not self.config.tool_shed_enabled:
-            return False
-
-        threshold = self.config.context_compress_threshold
-        keep_recent = max(1, self.config.tool_shed_keep_recent)
-        total_before = sum(len(str(m)) for m in self.messages)
-        if total_before <= threshold:
-            return False  # 未超阈值，没有减压必要
-
-        start = len(head)
-        if (start < len(self.messages)
-                and str(self.messages[start].content or "").startswith("=== 历史摘要 ===")):
-            start += 1
-
-        # tool_call_id -> 工具名，用于让占位符带上"这里查过什么"
-        name_by_id: Dict[str, str] = {}
-        for m in self.messages:
-            for tc in (m.tool_calls or []):
-                fid = tc.get("id") if isinstance(tc, dict) else None
-                fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-                if fid:
-                    name_by_id[fid] = fn.get("name") or "unknown"
-
-        candidates = []
-        for i in range(start, len(self.messages)):
-            m = self.messages[i]
-            if m.role != "tool" or not m.content:
-                continue
-            if m.content.startswith("[旧工具结果已清理]"):
-                continue  # 已清过
-            candidates.append((i, len(m.content)))
-
-        # 条数触发：攒够一批才动手，避免每迭代清一条导致前缀反复改写
-        if len(candidates) <= self.config.tool_shed_trigger_count:
-            return False
-
-        # 先试算（占位符写入不可逆）：清空除最近 keep_recent 条之外的全部
-        plan = []  # (index, placeholder)
-        saved = 0
-        for idx, ln in candidates[:-keep_recent]:
-            name = name_by_id.get(self.messages[idx].tool_call_id or "", "tool")
-            placeholder = shed_placeholder(name, ln)
-            gain = ln - len(placeholder)
-            if gain <= 0:
-                continue
-            plan.append((idx, placeholder))
-            saved += gain
-
-        # 收益门槛：清空会破坏前缀缓存，节省太小不值得
-        if not plan or saved < total_before * 0.05:
-            return False
-        # 收敛门槛：清完仍超阈值说明近期内容本身就撑爆了，级 1 帮不上，
-        # 把原文留给级 2 折叠（折叠能连结构一起压，收益更大）。
-        if total_before - saved > threshold:
-            return False
-
-        shed_msgs: List[Message] = []
-        for idx, placeholder in plan:
-            m = self.messages[idx]
-            m.content = placeholder
-            shed_msgs.append(m)
-
-        # 活上下文已无原文，标记 compacted=1（原文仍在 stream 表，可检索）
         try:
-            ids = [getattr(m, "_stream_id", None) for m in shed_msgs]
-            ids = [i for i in ids if i]
-            if ids and self._session_id:
-                from storage.stream import get_stream_store
-                get_stream_store().mark_compacted(self._session_id, ids)
+            changed, _saved = shed_tool_outputs(
+                self.messages,
+                self.config,
+                notify=self._notify,
+                session_id=self._session_id,
+                protect_tail_from=turn_start_idx,
+            )
+            return changed
         except Exception:
-            logger.debug("mark shed stream failed", exc_info=True)
-
-        self._notify(
-            f"[compact] 已清理 {len(shed_msgs)} 条早期工具结果，"
-            f"节省约 {saved} 字符（原文可 session_search 召回）"
-        )
-        return True
+            logger.debug("shed tool outputs failed", exc_info=True)
+            return False
 
     def _maybe_compact_prefix(self, preserve_current: bool = False) -> None:
         """上下文超阈值时折叠前缀历史。
@@ -2011,7 +1953,7 @@ class AgentLoop:
         has_summary_msg = (
             len(head) < len(self.messages)
             and self.messages[len(head)].role == "user"
-            and str(self.messages[len(head)].content or "").startswith("=== 历史摘要 ===")
+            and str(self.messages[len(head)].content or "").startswith(SUMMARY_HEADER)
         )
         boundary = self.ctx.get_compress_boundary(turn_start_idx)
         # 可直接替换的旧正文条数（排除摘要消息本身）

@@ -4,7 +4,11 @@
 from tools.registry import register_tool
 from subagent import SubagentRunner
 
+import itertools
 import os, sys as _sys
+
+# 状态栏展示用的 subagent 自增编号（itertools.count 的 next 在多线程下安全）
+_SA_SEQ = itertools.count(1)
 
 # 白名单工具: 只给 subagent 这些工具
 SUBAGENT_WHITELIST = {
@@ -13,6 +17,7 @@ SUBAGENT_WHITELIST = {
     "patch_file",
     "exec",
     "static_analysis",
+    "load_skill",
 }
 
 
@@ -39,7 +44,7 @@ def _build_whitelist_schemas() -> list:
     name="subagent_run",
     description=(
         "启动一个子智能体执行任务。subagent 只能使用: "
-        "read_file, write_file, patch_file, exec, static_analysis。"
+        "read_file, write_file, patch_file, exec, static_analysis, load_skill。"
         "subagent 复用主 Agent 的模型连接，在同一进程内同步执行，完成后自动销毁。"
     ),
     parameters={
@@ -86,7 +91,8 @@ def subagent_run(task: str, max_iterations: int = 20) -> str:
     system_prompt = """你是一个 subagent，专门协助主 Agent 完成具体的代码任务。
 
 规则:
-- 你只能使用以下工具: read_file, write_file, patch_file, exec, static_analysis
+- 你只能使用以下工具: read_file, write_file, patch_file, exec, static_analysis, load_skill
+- 任务涉及某个领域技能（漏洞挖掘、代码审查等）时，先用 load_skill 加载对应 skill 再动手
 - 直接输出任务结果，不要发送确认、感谢或追问
 - 完成后直接输出最终结果文本，不需要询问下一步
 - 不要调用 p2p_send、get_all_peer_names 等通信工具"""
@@ -94,11 +100,22 @@ def subagent_run(task: str, max_iterations: int = 20) -> str:
 
     # 构建实时状态追踪回调
     import time
+    import threading as _thr
+
     task_snippet = task[:42] + "…" if len(task) > 42 else task
     start_time = time.time()
     tool_counter = [0]
+    # 并发实例用线程 ident 作槽位 key，seq 只用于状态栏展示编号
+    sa_key = f"sa-{_thr.get_ident()}"
+    sa_seq = next(_SA_SEQ)
 
     def _on_progress(event_type: str, data: dict) -> None:
+        # 已被取消的实例不再回写状态栏：取消发生在两次检查点之间时，
+        # 残留的 chunk 回调会把刚刚 finalize() 清空的槽位重新写回去，
+        # 表现为「Ctrl+C 之后状态栏还在跑 subagent」。
+        from tools.call_context import is_cancelled
+        if is_cancelled():
+            return
         from team import get_output_engine
         engine = get_output_engine()
         if not engine:
@@ -106,6 +123,7 @@ def subagent_run(task: str, max_iterations: int = 20) -> str:
         if event_type == "tool_start":
             tool_counter[0] += 1
         info = {
+            "seq": sa_seq,
             "task": task_snippet,
             "_start": start_time,
             "tool_uses": tool_counter[0],
@@ -114,13 +132,14 @@ def subagent_run(task: str, max_iterations: int = 20) -> str:
         if event_type == "token_update":
             info["sent_est"] = data.get("sent", 0)
             info["recv_est"] = data.get("recv", 0)
-        engine.set_subagent(info)
+        engine.set_subagent(sa_key, info)
 
     # 立即在状态栏显示 subagent 运行中（不等工具回调）
     from team import get_output_engine as _get_oe
     _oe = _get_oe()
     if _oe:
-        _oe.set_subagent({
+        _oe.set_subagent(sa_key, {
+            "seq": sa_seq,
             "task": task_snippet,
             "_start": start_time,
             "tool_uses": 0,
@@ -141,7 +160,8 @@ def subagent_run(task: str, max_iterations: int = 20) -> str:
         from team import get_output_engine
         engine = get_output_engine()
         if engine:
-            engine.set_subagent({
+            engine.set_subagent(sa_key, {
+                "seq": sa_seq,
                 "task": task_snippet,
                 "_start": start_time,
                 "tool_uses": tool_counter[0],
@@ -152,10 +172,17 @@ def subagent_run(task: str, max_iterations: int = 20) -> str:
         from team import get_output_engine
         engine = get_output_engine()
         if engine:
-            engine.set_subagent({
+            engine.set_subagent(sa_key, {
+                "seq": sa_seq,
                 "task": task_snippet,
                 "_start": start_time,
                 "tool_uses": tool_counter[0],
                 "status": "failed",
             })
         raise
+    finally:
+        # 无论成功/失败/取消都回收自己的槽位，避免状态栏残留死条目
+        from team import get_output_engine
+        engine = get_output_engine()
+        if engine:
+            engine.clear_subagent(sa_key)

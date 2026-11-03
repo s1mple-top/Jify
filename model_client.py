@@ -102,7 +102,12 @@ class _RetryableStreamMixin:
         if not _is_transient(exc):
             return False
         self._attempt += 1
-        wait = 0.5 + random.uniform(0, 0.5)
+        # 指数退避：首次重连多为连接抖动，但 ReadTimeout 的主因是服务端 prefill
+        # 大上下文或网关限流，这类状态的恢复窗口是秒级到十秒级。原先 0.5~1s 的
+        # 固定抖动会让两次重连挤在同一时间窗内，第 2 次基本必然同样失败。
+        # max_attempts=3 => 2 次重连，退避 2s / 4s；叠加 3 次 10s 读超时后
+        # 累计约 36s，与 _retry 的 backoff_base=3.0 同量级。
+        wait = 2.0 ** (self._attempt - 1) + random.uniform(0, 1)
         logger.warning(
             "stream interrupted before any output (%s), reconnecting %d/%d in %.1fs",
             type(exc).__name__, self._attempt, self._max_attempts, wait,

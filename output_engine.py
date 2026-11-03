@@ -17,7 +17,9 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.table import Table as RichTable
 from rich import box as rich_box
+from rich.markup import escape
 from rich.text import Text
+from rich.cells import cell_len
 from rich.theme import Theme
 from pygments.styles.monokai import MonokaiStyle
 from pygments.styles.dracula import DraculaStyle
@@ -37,6 +39,8 @@ _TEAM_BOX = rich_box.Box(
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 _TABLE_SEP_RE = re.compile(r'^\s*\|[-\s:]+\|')
+# 代码围栏起始行：``` 或 ~~~（允许带语言标识和缩进）
+_FENCE_RE = re.compile(r'^\s*(`{3,}|~{3,})')
 _EMOJI_RE = re.compile(
     "["
     "\U0001F600-\U0001F64F"  # emoticons
@@ -191,17 +195,15 @@ class OutputEngine:
         self._anim_recv: int = 0
         self._anim_recv_target: int = 0
 
-        # subagent 独立的 token 动画变量，复用主 Agent 同款指数平滑
-        self._anim_subagent_sent: int = 0
-        self._anim_subagent_sent_target: int = 0
-        self._anim_subagent_recv: int = 0
-        self._anim_subagent_recv_target: int = 0
+        # subagent token 动画：按实例 key 各存一组 (cur_sent, target_sent, cur_recv, target_recv)
+        self._anim_sa: Dict[str, Dict[str, int]] = {}
 
         self._model_phase: str = "idle"
         self._workflow_status: Optional[Dict] = None
         self._team_workers: Dict[str, Dict] = {}
         self._todos: Optional[list] = None
-        self._subagent: Optional[Dict] = None
+        # 并发 subagent 可能同时运行，按 key（线程 ident）分槽位，避免互相覆盖
+        self._subagents: Dict[str, Dict] = {}
 
         self._tip_index: int = 0
         self._tip_last_tick: float = 0.0
@@ -244,19 +246,29 @@ class OutputEngine:
         with self._anim_lock:
             self._team_workers.clear()
 
-    def set_subagent(self, info: Dict) -> None:
-        """状态栏里更新 subagent 实时状态"""
+    def set_subagent(self, key: str, info: Dict) -> None:
+        """状态栏里更新某个 subagent 的实时状态（key 用线程 ident 区分并发实例）"""
         with self._anim_lock:
-            self._subagent = info
-            # 同步更新 token 动画目标值
+            self._subagents[key] = info
+            # 同步更新该实例的 token 动画目标值
+            anim = self._anim_sa.get(key)
+            if anim is None:
+                anim = {"cur_sent": 0, "target_sent": 0, "cur_recv": 0, "target_recv": 0}
+                self._anim_sa[key] = anim
             if "sent_est" in info:
-                self._anim_subagent_sent_target = info["sent_est"]
+                anim["target_sent"] = info["sent_est"]
             if "recv_est" in info:
-                self._anim_subagent_recv_target = info["recv_est"]
+                anim["target_recv"] = info["recv_est"]
 
-    def clear_subagent(self) -> None:
+    def clear_subagent(self, key: Optional[str] = None) -> None:
+        """清理 subagent 槽位：传 key 只清该实例，不传则清全部"""
         with self._anim_lock:
-            self._subagent = None
+            if key is None:
+                self._subagents.clear()
+                self._anim_sa.clear()
+            else:
+                self._subagents.pop(key, None)
+                self._anim_sa.pop(key, None)
 
     def set_todos(self, todos: list) -> None:
         """更新 todos 列表，由动画线程下一帧渲染到状态栏。"""
@@ -335,7 +347,7 @@ class OutputEngine:
                     workflow_status: Optional[Dict] = None,
                     team_workers: Optional[Dict] = None,
                     todos: Optional[list] = None,
-                    subagent: Optional[Dict] = None,
+                    subagents: Optional[Dict[str, Dict]] = None,
                     tip: str = "") -> Any:
         t = Text("")
         team_table = None
@@ -387,10 +399,23 @@ class OutputEngine:
             now = time.time()
             team_table = RichTable(box=_TEAM_BOX, show_header=False, padding=(0, 1), expand=False)
             cells = []
+            # 多 worker 并排时每列只有终端宽度的 1/N，think 行必须按列宽裁剪，
+            # 否则按整行宽度裁出来的内容在列内会被 fold 成多行，状态栏随之抖动。
+            _n_cols = max(1, len(team_workers))
+            _col_avail = max(16, (self.console.width - 3 * _n_cols) // _n_cols - 2)
             for wid, info in sorted(team_workers.items()):
                 task = info.get("task", "")
-                if len(task) > 26:
-                    task = task[:23] + "…"
+                # 头部行 "⏳ wid  task" 也要按列宽截断，否则同样会被折行
+                task_avail = max(6, _col_avail - 6 - cell_len(wid))
+                if cell_len(task) > task_avail:
+                    kept, used = [], 0
+                    for ch in task:
+                        cw = cell_len(ch)
+                        if used + cw > task_avail - 1:
+                            break
+                        used += cw
+                        kept.append(ch)
+                    task = "".join(kept) + "…"
                 _start = info.get("_start")
                 if _start is not None:
                     w_elapsed = now - _start
@@ -412,51 +437,95 @@ class OutputEngine:
                 if last_tool:
                     cell.append(f" · {last_tool}", style=JifyTheme.GREEN)
 
-                # worker 统一活动流：think / 正文 / tool 按发生顺序混排，共用同一行预算，
-                # 新活动滚入、旧行自动滚出（与主 Agent 的交互式输出一致，不做累积清单）
+                # think 跑马灯：固定占一行，采集侧已压成单行并只保留尾部。
+                # 这里按「本列」可用宽度裁一次（前缀 "  ✻ " 占 4 列），保证不折行
+                # （折行会让状态栏抖动）。必须按显示宽度裁（中文占 2 列）。
+                # 没有 think 时也保留这一行（填空白），否则状态栏高度会随
+                # think 的有无上下跳。
+                think_line = (info.get("think") or "").strip()
+                if think_line:
+                    avail = max(12, _col_avail - 4)
+                    if cell_len(think_line) > avail:
+                        tail, used = [], 0
+                        for ch in reversed(think_line):
+                            cw = cell_len(ch)
+                            if used + cw > avail - 1:
+                                break
+                            used += cw
+                            tail.append(ch)
+                        think_line = "\u2026" + "".join(reversed(tail))
+                    cell.append("\n", style=JifyTheme.SUBTLE)
+                    cell.append(f"  \u273b {think_line}", style=JifyTheme.SUBTLE)
+                else:
+                    cell.append("\n", style=JifyTheme.SUBTLE)
+                    cell.append(" ", style=JifyTheme.SUBTLE)
+
+                # worker 活动流：只展示工具调用，正文由 worker 结果统一回给主 Agent
                 flat = []
                 for entry in info.get("stream") or []:
-                    kind = entry.get("kind", "text")
+                    if entry.get("kind") != "tool":
+                        continue
                     for ln in (entry.get("text") or "").splitlines():
                         if ln.strip():
-                            flat.append((kind, ln))
-                for kind, ln in flat[-_MAX_STREAM_LINES:]:
-                    label, style = {
-                        "think": ("✻", JifyTheme.SUBTLE),
-                        "text": ("▸", JifyTheme.SUBTLE),
-                        "tool": ("•", JifyTheme.GREEN),
-                    }.get(kind, ("·", JifyTheme.SUBTLE))
+                            flat.append(ln)
+                # tool 行同样要按列宽裁剪：列宽是 auto 且未设 no_wrap，
+                # 只靠 overflow="ellipsis" 仍会 wrap，超长内容折到下一行后
+                # 缩进丢失，状态栏高度跟着涨。前缀 "  • " 占 4 列。
+                for ln in flat[-_MAX_STREAM_LINES:]:
+                    avail = max(12, _col_avail - 4)
+                    if cell_len(ln) > avail:
+                        kept, used = [], 0
+                        for ch in ln:
+                            cw = cell_len(ch)
+                            if used + cw > avail - 1:
+                                break
+                            used += cw
+                            kept.append(ch)
+                        ln = "".join(kept) + "…"
                     cell.append("\n", style=JifyTheme.SUBTLE)
-                    cell.append(f"  {label} {ln}", style=style)
+                    cell.append(f"  • {ln}", style=JifyTheme.GREEN)
                 if sent_est or recv_est:
                     cell.append("\n", style=JifyTheme.SUBTLE)
                     cell.append(f"  ↑{self.fmt_tokens(sent_est // 2)} ↓{self.fmt_tokens(recv_est // 2)}", style=JifyTheme.SUBTLE)
                 cells.append(cell)
-                team_table.add_column(overflow="fold")
+                # ellipsis 兜底：即使个别内容算宽仍有偏差，也只截断不折行
+                team_table.add_column(overflow="ellipsis")
             team_table.add_row(*cells)
 
-        if subagent:
-            task = subagent.get("task", "")
-            if len(task) > 42:
-                task = task[:39] + "…"
-            _start = subagent.get("_start")
-            if _start is not None:
-                sa_elapsed = time.time() - _start
-            else:
-                sa_elapsed = subagent.get("elapsed", 0)
-            tool_uses = subagent.get("tool_uses", 0)
-            status = subagent.get("status", "running")
-            sent_est = subagent.get("sent_est", 0)
-            recv_est = subagent.get("recv_est", 0)
-            symbol = {"pending": "○", "running": "⏳", "completed": "✓", "failed": "✗"}.get(status, "⏳")
-            token_info = ""
-            if sent_est:
-                # 初期的架构设计缺陷，暂时使用预估token计数
-                token_info += f" · ↑ {self.fmt_tokens(sent_est // 2)} tokens"
-            if recv_est:
-                token_info += f" · ↓ {self.fmt_tokens(recv_est // 2)} tokens"
-            t.append("\n")
-            t.append(f'  🤖 subagent(task="{task}")  ({symbol} {self.fmt_elapsed(sa_elapsed)} · {tool_uses} tools{token_info})', style=JifyTheme.SUBTLE)
+        if subagents:
+            now_sa = time.time()
+            # 按启动时间排序，先起的排前面
+            ordered = sorted(
+                subagents.items(),
+                key=lambda kv: (kv[1].get("_start") or 0, str(kv[0])),
+            )
+            for idx, (key, sa) in enumerate(ordered):
+                task = sa.get("task", "")
+                if len(task) > 42:
+                    task = task[:39] + "…"
+                _start = sa.get("_start")
+                if _start is not None:
+                    sa_elapsed = now_sa - _start
+                else:
+                    sa_elapsed = sa.get("elapsed", 0)
+                tool_uses = sa.get("tool_uses", 0)
+                status = sa.get("status", "running")
+                sent_est = sa.get("sent_est", 0)
+                recv_est = sa.get("recv_est", 0)
+                symbol = {"pending": "○", "running": "⏳", "completed": "✓", "failed": "✗"}.get(status, "⏳")
+                seq = sa.get("seq", idx + 1)
+                token_info = ""
+                if sent_est:
+                    # 初期的架构设计缺陷，暂时使用预估token计数
+                    token_info += f" · ↑ {self.fmt_tokens(sent_est // 2)} tokens"
+                if recv_est:
+                    token_info += f" · ↓ {self.fmt_tokens(recv_est // 2)} tokens"
+                t.append("\n")
+                t.append(
+                    f'  🤖 subagent#{seq}(task="{task}")  '
+                    f"({symbol} {self.fmt_elapsed(sa_elapsed)} · {tool_uses} tools{token_info})",
+                    style=JifyTheme.SUBTLE,
+                )
 
         if todos:
             status_icon = {
@@ -558,12 +627,10 @@ class OutputEngine:
         self._anim_target = 0
         self._anim_recv = 0
         self._anim_recv_target = 0
-        self._anim_subagent_sent = 0
-        self._anim_subagent_sent_target = 0
-        self._anim_subagent_recv = 0
-        self._anim_subagent_recv_target = 0
+        self._anim_sa.clear()
         self._workflow_status = None
         self._team_workers.clear()
+        self._subagents.clear()
         self._todos = None
         self._tip_index = 0
         self._tip_last_tick = 0.0
@@ -603,17 +670,17 @@ class OutputEngine:
                         step = max(1, int(gap * alpha + 0.5))
                         self._anim_recv = min(self._anim_recv + step, self._anim_recv_target)
 
-                    # subagent token 平滑动画，复用同款指数逼近
-                    if self._anim_subagent_sent < self._anim_subagent_sent_target:
-                        gap = self._anim_subagent_sent_target - self._anim_subagent_sent
+                    # subagent token 平滑动画，每个实例各自指数逼近
+                    for _sa_anim in self._anim_sa.values():
                         alpha = 1.0 - math.exp(-dt / 0.2)
-                        step = max(1, int(gap * alpha + 0.5))
-                        self._anim_subagent_sent = min(self._anim_subagent_sent + step, self._anim_subagent_sent_target)
-                    if self._anim_subagent_recv < self._anim_subagent_recv_target:
-                        gap = self._anim_subagent_recv_target - self._anim_subagent_recv
-                        alpha = 1.0 - math.exp(-dt / 0.2)
-                        step = max(1, int(gap * alpha + 0.5))
-                        self._anim_subagent_recv = min(self._anim_subagent_recv + step, self._anim_subagent_recv_target)
+                        if _sa_anim["cur_sent"] < _sa_anim["target_sent"]:
+                            gap = _sa_anim["target_sent"] - _sa_anim["cur_sent"]
+                            step = max(1, int(gap * alpha + 0.5))
+                            _sa_anim["cur_sent"] = min(_sa_anim["cur_sent"] + step, _sa_anim["target_sent"])
+                        if _sa_anim["cur_recv"] < _sa_anim["target_recv"]:
+                            gap = _sa_anim["target_recv"] - _sa_anim["cur_recv"]
+                            step = max(1, int(gap * alpha + 0.5))
+                            _sa_anim["cur_recv"] = min(_sa_anim["cur_recv"] + step, _sa_anim["target_recv"])
 
                     elapsed = time.time() - self._session_start_time
                     phrase = self._phrase
@@ -623,24 +690,26 @@ class OutputEngine:
                     wf_status = self._workflow_status
                     team_snapshot = dict(self._team_workers)
                     todos_snapshot = list(self._todos) if self._todos else None
-                    subagent_snapshot = dict(self._subagent) if self._subagent else None
-                    if subagent_snapshot:
-                        subagent_snapshot["sent_est"] = self._anim_subagent_sent
-                        subagent_snapshot["recv_est"] = self._anim_subagent_recv
+                    subagent_snapshot = {k: dict(v) for k, v in self._subagents.items()}
+                    for _key, _snap in subagent_snapshot.items():
+                        _anim = self._anim_sa.get(_key)
+                        if _anim is not None:
+                            _snap["sent_est"] = _anim["cur_sent"]
+                            _snap["recv_est"] = _anim["cur_recv"]
 
                     tip_text = ""
                     now_tip = time.monotonic()
                     if now_tip - self._tip_last_tick > 5.0:
                         self._tip_index = (self._tip_index + 1) % len(self.TIPS)
                         self._tip_last_tick = now_tip
-                    tip_text = self.TIPS[self._tip_index] if not team_snapshot and not todos_snapshot and not wf_status else ""
+                    tip_text = self.TIPS[self._tip_index] if not team_snapshot and not todos_snapshot and not wf_status and not subagent_snapshot else ""
 
                     if self._live is not None and self._live_active:
                         wave = time.monotonic() * 3.0
                         self._live.update(
                             self.status_line(phrase, elapsed, sent, recv, wave, phase,
                                              wf_status, team_snapshot, todos_snapshot,
-                                             subagent=subagent_snapshot,
+                                             subagents=subagent_snapshot or None,
                                              tip=tip_text)
                         )
 
@@ -738,19 +807,68 @@ class OutputEngine:
         line = line.strip()
         if line.startswith('|'):
             line = line[1:]
+        # 结尾的 | 只有在前面是偶数个反斜杠时才是列分隔符（\| 是字面竖线）
         if line.endswith('|'):
-            line = line[:-1]
-        return [c for c in line.split('|')]
+            run = 0
+            k = len(line) - 2
+            while k >= 0 and line[k] == '\\':
+                run += 1
+                k -= 1
+            if run % 2 == 0:
+                line = line[:-1]
+        # 按未转义的 | 切列：统计 | 前连续反斜杠的个数，奇数表示该竖线被转义，
+        # 偶数表示它是分隔符；反斜杠本身按 Markdown 规则成对折半还原。
+        cells = []
+        buf = []
+        i = 0
+        n = len(line)
+        while i < n:
+            ch = line[i]
+            if ch == '\\':
+                j = i
+                while j < n and line[j] == '\\':
+                    j += 1
+                run = j - i
+                if j < n and line[j] == '|':
+                    buf.append('\\' * (run // 2))
+                    if run % 2 == 0:
+                        cells.append(''.join(buf))
+                        buf = []
+                    else:
+                        buf.append('|')
+                    i = j + 1
+                else:
+                    buf.append('\\' * run)
+                    i = j
+            elif ch == '|':
+                cells.append(''.join(buf))
+                buf = []
+                i += 1
+            else:
+                buf.append(ch)
+                i += 1
+        cells.append(''.join(buf))
+        return cells
 
     @staticmethod
     def _markdown_cell_to_text(cell: str) -> Text:
         """将单元格内的 Markdown 内联格式转为 Rich Text 对象。"""
         # 剥离 emoji，避免 Rich Table 列宽计算偏差导致竖线错位
         text = _EMOJI_RE.sub('', cell).strip()
+        raw = text
+        # 先转义原文，避免单元格里的 [xxx] / [/xxx] 被当成 rich 标签解析
+        # （如 [/Users/.../ctf-web] 会抛 MarkupError 打死整轮对话）；
+        # escape 必须在下面的标签替换之前，否则自己插入的 [bold] 也会被转义。
+        text = escape(text)
+        # rich.escape() 会给奇数个结尾反斜杠补一个，防止它与后续拼接的标签组成
+        # 转义序列。这里之后不再拼接 markup，补位会显示成多出来的反斜杠
+        # （C:\path\ -> C:\path\\），所以把补的那一个去掉。
+        if raw.endswith('\\') and not raw.endswith('\\\\') and text.endswith('\\\\'):
+            text = text[:-1]
         text = re.sub(r'\*\*(.+?)\*\*', r'[bold]\1[/bold]', text)
         text = re.sub(r'\*(.+?)\*', r'[italic]\1[/italic]', text)
         text = re.sub(r'`(.+?)`', r'[italic]\1[/italic]', text)
-        return Text.from_markup(text)
+        return Text.from_markup(text, emoji=False)
 
     def _build_rich_table(self, table_text: str) -> RichTable:
         lines = table_text.strip().split('\n')
@@ -799,9 +917,26 @@ class OutputEngine:
         i = 0
         segments = []
         non_table_lines = []
+        # 代码围栏（``` / ~~~）内部的内容必须原样交给 Markdown 渲染，
+        # 否则代码块里出现的表格示例会被当成真表格抽出来，围栏也被拆两半。
+        fence = ''
 
         while i < len(lines):
-            if _TABLE_SEP_RE.match(lines[i]):
+            line = lines[i]
+            fence_match = _FENCE_RE.match(line)
+            if fence_match:
+                marker = fence_match.group(1)
+                if not fence:
+                    # 记录完整标记长度：```` 包裹 ``` 时，内部的 ``` 不该结束外层围栏
+                    fence = marker
+                elif marker[0] == fence[0] and len(marker) >= len(fence):
+                    fence = ''
+                non_table_lines.append(line)
+                i += 1
+            elif fence or not _TABLE_SEP_RE.match(line):
+                non_table_lines.append(line)
+                i += 1
+            else:
                 # _has_table 的 header 行必须包含 | 才算有效表格头，
                 # 否则它只是一个恰好出现在分隔行上方的普通行（如 Markdown 标题）
                 header_line = ''
@@ -830,9 +965,6 @@ class OutputEngine:
                     non_table_lines.append(sep_line)
                     non_table_lines.extend(data_lines)
                 i = j
-            else:
-                non_table_lines.append(lines[i])
-                i += 1
 
         if non_table_lines:
             seg_text = '\n'.join(non_table_lines).strip()

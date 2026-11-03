@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from event_bus import event_bus, UIEvent
 from rich.text import Text
 from subagent import SubagentRunner
+from context_shed import SUMMARY_HEADER
 from tools.registry import registry, _subagent_whitelist
 from tools.call_context import (
     CallContext, register_killer, set_call_context, reset_call_context,
@@ -155,25 +156,22 @@ class TeamWorker:
         return mc() if callable(mc) else mc
 
     def _build_progress_callback(self, task_snippet: str, start_time: float, tool_counter: list, detail: Dict):
-        """构建进度回调：把 thinking/text/tool/token 细节累积到 detail 并同步到状态行。
+        """构建进度回调：把 think/tool/token 细节累积到 detail 并同步到状态行。
 
         detail 为可变 dict（由 _execute 持有引用），跨事件累积：
-        - stream:   统一活动流 [{kind: think|text|tool, text}]，按发生顺序混排，
-                    think / 正文 / 工具调用共用同一条滚动队列（新行滚入、旧行滚出）。
+        - stream:   工具调用活动流 [{kind: tool, text}]，新行滚入、旧行滚出。
+        - think:    最近一段推理内容，压成单行并只保留尾部（状态栏跑马灯）。
         - last_tool: 最近一次工具名
         - sent_est / recv_est: token 估算
         """
         engine = get_output_engine()
-        _SEG_TAIL = 300    # 单条 think/text 尾部保留字符数
         _STREAM_MAX = 40   # 活动流条目上限
+        _THINK_TAIL = 72   # think 跑马灯窗口：只留尾部这段字符
 
         def _push(kind: str, text: str) -> None:
-            """追加活动流条目；think/text 与上一条同类型时合并（连续流式内容）。"""
+            """追加活动流条目。"""
             stream = detail["stream"]
-            if kind in ("think", "text") and stream and stream[-1]["kind"] == kind:
-                stream[-1]["text"] = (stream[-1]["text"] + text)[-_SEG_TAIL:]
-            else:
-                stream.append({"kind": kind, "text": text})
+            stream.append({"kind": kind, "text": text})
             if len(stream) > _STREAM_MAX:
                 del stream[:-_STREAM_MAX]
 
@@ -184,6 +182,7 @@ class TeamWorker:
                 "tool_uses": tool_counter[0],
                 "status": "running",
                 "stream": list(detail["stream"]),
+                "think": detail.get("think", ""),
                 "last_tool": detail["last_tool"],
                 "sent_est": detail["sent_est"],
                 "recv_est": detail["recv_est"],
@@ -197,21 +196,41 @@ class TeamWorker:
                 tool_counter[0] += 1
                 name = data.get("name", "")
                 detail["last_tool"] = name
+                # 有工具调用说明推理阶段结束，跑马灯该让位
+                detail["think"] = ""
                 args = data.get("args", {}) or {}
                 args_str = json.dumps(args, ensure_ascii=False) if args else ""
                 if len(args_str) > 80:
                     args_str = args_str[:77] + "\u2026"
                 _push("tool", f"{name}({args_str})")
             elif event_type == "thinking":
-                _push("think", data.get("text", ""))
-            elif event_type == "text":
-                _push("text", data.get("text", ""))
+                # 压成单行 + 只留尾部：新字符从右进、旧字符从左出，形成滚动效果。
+                # 不保留全文是刻意的，状态栏只提供「它此刻在想什么」的粗粒度感知。
+                seg = (data.get("text") or "").replace("\n", " ").replace("\r", " ")
+                detail["think"] = (detail.get("think", "") + seg)[-_THINK_TAIL:]
             elif event_type == "token_update":
                 detail["sent_est"] = data.get("sent", 0)
                 detail["recv_est"] = data.get("recv", 0)
             _emit()
 
         return _on_progress
+
+    def _effective_system_prompt(self) -> str:
+        """Worker 实际使用的 system prompt。
+
+        仅当 whitelist 含 load_skill 时追加 skill 清单：否则 Worker 拿到名字
+        也无从加载，纯属噪音。格式与主 Agent 的「## 拥有的skill」段保持一致。
+        """
+        if "load_skill" not in self.whitelist:
+            return self.system_prompt
+        try:
+            from tools.skill_paths import discover_skills
+            lines = [f"- {e.name}: {e.description}" for e in discover_skills()]
+        except Exception:
+            return self.system_prompt
+        if not lines:
+            return self.system_prompt
+        return self.system_prompt + "\n\n## 拥有的skill\n" + "\n".join(lines)
 
     def _build_schemas(self) -> List[Dict]:
         """从 whitelist 名称构建 tool schemas"""
@@ -268,12 +287,21 @@ class TeamWorker:
         """
         提交任务并阻塞等待结果
 
+        超时只是 leader 侧放弃等待，worker 线程仍在跑。必须显式置取消信号，
+        否则这个 worker 会被占满 max_iterations 次迭代，队列里排着的下一个
+        任务只能干等。
+
         Returns:
             Worker 输出的最终文本
         """
         future = self.submit(task)
         try:
             return future.result(timeout=timeout)
+        except TimeoutError:
+            _cancel_team_task(task)
+            task.status = "failed"
+            task.error = f"任务超时 ({timeout}s)"
+            return f"[TeamWorker:{self.worker_id}] 任务失败: 超时 {timeout}s"
         except Exception as e:
             task.status = "failed"
             task.error = str(e)
@@ -323,6 +351,7 @@ class TeamWorker:
         engine = get_output_engine()
         detail = {
             "stream": [],
+            "think": "",
             "last_tool": "",
             "sent_est": 0,
             "recv_est": 0,
@@ -340,6 +369,7 @@ class TeamWorker:
                 "tool_uses": 0,
                 "status": "running",
                 "stream": [],
+                "think": "",
                 "last_tool": "",
                 "sent_est": 0,
                 "recv_est": 0,
@@ -351,7 +381,7 @@ class TeamWorker:
         try:
             result = runner.run(
                 task=task.content,
-                system_prompt=self.system_prompt,
+                system_prompt=self._effective_system_prompt(),
                 whitelist_schemas=self._whitelist_schemas,
                 whitelist_names=self.whitelist,
                 max_iterations=self.max_iterations,
@@ -386,6 +416,7 @@ class TeamWorker:
                     "tool_uses": tool_counter[0],
                     "status": task.status,
                     "stream": list(detail["stream"]),
+                    "think": detail.get("think", ""),
                     "last_tool": detail["last_tool"],
                     "sent_est": detail["sent_est"],
                     "recv_est": detail["recv_est"],
@@ -396,6 +427,7 @@ class TeamWorker:
                 "tool_uses": tool_counter[0],
                 "status": task.status,
                 "stream": list(detail["stream"]),
+                "think": detail.get("think", ""),
                 "last_tool": detail["last_tool"],
                 "sent_est": detail["sent_est"],
                 "recv_est": detail["recv_est"],
@@ -455,8 +487,7 @@ class TeamWorker:
             summary = ""
 
         if summary:
-            self._history = [{"role": "user", "content": "=== 历史任务摘要 ===\n" + summary}]
-
+            self._history = [{"role": "user", "content": SUMMARY_HEADER + "\n" + summary}]
 
 
 # TeamLeader — 编排器
@@ -509,6 +540,15 @@ class TeamLeader:
             if worker_id in self._workers:
                 raise ValueError(f"Worker '{worker_id}' 已存在")
 
+            # 校验 whitelist 里的工具名：写错的名字会被 _build_schemas 静默丢弃，
+            # Worker 起来后少工具却毫无提示，所以在启动前就顶回去让模型改。
+            unknown = sorted(set(whitelist) - set(registry.get_all_names()))
+            if unknown:
+                raise ValueError(
+                    f"以下工具不存在，请检查拼写: {', '.join(unknown)}；"
+                    f"当前可用工具: {', '.join(sorted(registry.get_all_names()))}"
+                )
+
             worker = TeamWorker(
                 worker_id=worker_id,
                 model_client=self.model_client,
@@ -522,8 +562,19 @@ class TeamLeader:
             return worker
 
     def remove_worker(self, worker_id: str):
+        """移除 Worker，并取消它名下在途的任务。
+
+        只摘 dict 不够：worker 线程仍在 _execute 里，既不读 _running 也不读毒丸，
+        shutdown() 的 join(timeout=5) 只能白白等满。必须先置取消信号，让它自己
+        在下一个检查点退出。
+        """
         with self._lock:
             worker = self._workers.pop(worker_id, None)
+            pending = [t for t in self._tasks.values()
+                       if t.worker_id == worker_id and t.status in ("pending", "running")]
+        for t in pending:
+            _cancel_team_task(t)
+            t.status = "interrupted"
         if worker:
             worker.shutdown()
 
@@ -532,10 +583,11 @@ class TeamLeader:
         if worker_id is not None:
             self.remove_worker(worker_id)
             return
+        # 全部关闭时逐个走 remove_worker，取消逻辑只有一份实现
         with self._lock:
-            for w in list(self._workers.values()):
-                w.shutdown()
-            self._workers.clear()
+            worker_ids = list(self._workers.keys())
+        for wid in worker_ids:
+            self.remove_worker(wid)
 
 
     # 任务委派
@@ -647,7 +699,12 @@ class TeamLeader:
 
         # 提交到线程池
         raw_results: Dict[str, str] = {}
-        with ThreadPoolExecutor(max_workers=len(team_tasks)) as pool:
+        task_by_id = {t.id: t for t in team_tasks}
+        # 不用 with：ThreadPoolExecutor 退出 with 会隐式 shutdown(wait=True)，
+        # 只要还有线程没返回，整个 delegate_parallel 就被拖住。改为等待超时时
+        # 显式取消对应 worker，线程自己在下一个检查点退出。
+        pool = ThreadPoolExecutor(max_workers=len(team_tasks))
+        try:
             futures: Dict[str, Future] = {}
             for i, t in enumerate(team_tasks):
                 wid = worker_ids[i] if worker_ids else None
@@ -666,8 +723,13 @@ class TeamLeader:
             for task_id, fut in futures.items():
                 try:
                     raw_results[task_id] = fut.result(timeout=timeout + 5)
+                except TimeoutError as e:
+                    _cancel_team_task(task_by_id[task_id])
+                    raw_results[task_id] = json.dumps({"error": f"任务超时: {e}"})
                 except Exception as e:
                     raw_results[task_id] = json.dumps({"error": str(e)})
+        finally:
+            pool.shutdown(wait=False)
 
         # 汇总统计 + 清除状态行
         total_tool_uses = 0
@@ -690,9 +752,11 @@ class TeamLeader:
         _emit_team_update(None, None, clear=True)
 
         summary = f"✓ Team 任务全部完成: {total_tool_uses} tool uses · {total_elapsed:.1f}s"
-        event_bus.put(UIEvent("TEXT", summary))
         if engine:
             engine.queue_output(Text(summary, style="bold white"))
+        else:
+            # gateway 模式无 OutputEngine，只能走 event_bus 透传到前端
+            event_bus.put(UIEvent("TEXT", summary))
 
         return json.dumps(parsed_results, ensure_ascii=False, indent=2)
 
