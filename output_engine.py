@@ -350,9 +350,17 @@ class OutputEngine:
                     subagents: Optional[Dict[str, Dict]] = None,
                     tip: str = "") -> Any:
         t = Text("")
+        # 状态栏所有行禁止折行：帧高必须只由条目数决定。超宽行一旦折行，
+        # 帧高可能超过终端高度，Live 重绘时光标上移越界 → 整屏滚动爆闪。
+        t.no_wrap = True
+        t.overflow = "crop"
         team_table = None
         # team worker 统一活动流展示行数上限：think / 正文 / tool 共用同一预算
         _MAX_STREAM_LINES = 10
+        # 行数预算：帧高封顶在终端高度内（留 1 行余量，块高恰好 == 终端高时
+        # 光标落在末行，边界上仍可能触发一次滚动）
+        _max_lines = max(6, self.console.height - 1)
+        _wf_lines = 0
 
         t.append("✦ ", style=f"italic {JifyTheme.SUBTLE}")
         if wave_offset:
@@ -392,6 +400,7 @@ class OutputEngine:
                 symbol = {"running": "⏳", "done": "✓", "error": "✗"}.get(s.get("state", ""), "○")
                 parts.append(f"{s['id']} {symbol}")
             if parts:
+                _wf_lines = 1
                 t.append("\n")
                 t.append(f"  ⚙ {wf['name']} › {' · '.join(parts)}", style=JifyTheme.SUBTLE)
 
@@ -492,6 +501,26 @@ class OutputEngine:
                 team_table.add_column(overflow="ellipsis")
             team_table.add_row(*cells)
 
+        # 行数预算分配：header(1) + workflow 行先扣除，subagent 优先占用剩余
+        # 预算（实时活动主体），todos 存在时保底留 1 行；subagent 超出部分
+        # 折叠成 1 行摘要，todos 超出截掉低优先级尾部。
+        _remaining = _max_lines - 1 - _wf_lines
+        _n_sa = len(subagents) if subagents else 0
+        _n_todo = len(todos) if todos else 0
+        if _n_sa + _n_todo > _remaining:
+            _sa_slot = _remaining - 1 if _n_todo else _remaining
+            _sa_visible = min(_n_sa, max(0, _sa_slot))
+            if _n_sa > _sa_visible:
+                # 折叠摘要行本身占 1 行
+                _sa_visible = max(0, _sa_slot - 1)
+            _todo_visible = min(
+                _n_todo,
+                max(0, _remaining - _sa_visible - (1 if _n_sa > _sa_visible else 0)),
+            )
+        else:
+            _sa_visible = _n_sa
+            _todo_visible = _n_todo
+
         if subagents:
             now_sa = time.time()
             # 按启动时间排序，先起的排前面
@@ -499,10 +528,8 @@ class OutputEngine:
                 subagents.items(),
                 key=lambda kv: (kv[1].get("_start") or 0, str(kv[0])),
             )
-            for idx, (key, sa) in enumerate(ordered):
+            for idx, (key, sa) in enumerate(ordered[:_sa_visible]):
                 task = sa.get("task", "")
-                if len(task) > 42:
-                    task = task[:39] + "…"
                 _start = sa.get("_start")
                 if _start is not None:
                     sa_elapsed = now_sa - _start
@@ -520,12 +547,40 @@ class OutputEngine:
                     token_info += f" · ↑ {self.fmt_tokens(sent_est // 2)} tokens"
                 if recv_est:
                     token_info += f" · ↓ {self.fmt_tokens(recv_est // 2)} tokens"
+                # 行整体是 no_wrap+crop，超宽会从行尾裁掉统计信息，因此先拼
+                # 后缀量出宽度，再用剩余宽度按「显示宽度」截 task（中文占 2 列），
+                # 保证时长/工具数/token 统计不被裁。80 列窄终端下 head+tail
+                # 本身可能就占满整行，此时逐级降级：先丢 token 统计再丢工具数。
+                _head = f'  🤖 subagent#{seq}(task="'
+                _seg = f"{symbol} {self.fmt_elapsed(sa_elapsed)}"
+                if tool_uses:
+                    _seg += f" · {tool_uses} tools"
+                if token_info:
+                    _seg += token_info
+                _task_avail = self.console.width - cell_len(_head) - cell_len(f'")  ({_seg})')
+                if _task_avail < 8 and token_info:
+                    _seg = f"{symbol} {self.fmt_elapsed(sa_elapsed)}"
+                    if tool_uses:
+                        _seg += f" · {tool_uses} tools"
+                    _task_avail = self.console.width - cell_len(_head) - cell_len(f'")  ({_seg})')
+                if _task_avail < 6 and tool_uses:
+                    _seg = f"{symbol} {self.fmt_elapsed(sa_elapsed)}"
+                    _task_avail = self.console.width - cell_len(_head) - cell_len(f'")  ({_seg})')
+                _tail = f'")  ({_seg})'
+                if cell_len(task) > _task_avail:
+                    kept, used = [], 0
+                    for ch in task:
+                        cw = cell_len(ch)
+                        if used + cw > _task_avail - 1:
+                            break
+                        used += cw
+                        kept.append(ch)
+                    task = "".join(kept) + "…" if _task_avail >= 1 else ""
                 t.append("\n")
-                t.append(
-                    f'  🤖 subagent#{seq}(task="{task}")  '
-                    f"({symbol} {self.fmt_elapsed(sa_elapsed)} · {tool_uses} tools{token_info})",
-                    style=JifyTheme.SUBTLE,
-                )
+                t.append(f"{_head}{task}{_tail}", style=JifyTheme.SUBTLE)
+            if _n_sa > _sa_visible:
+                t.append("\n")
+                t.append(f"  🤖 … +{_n_sa - _sa_visible} more", style=JifyTheme.SUBTLE)
 
         if todos:
             status_icon = {
@@ -542,7 +597,8 @@ class OutputEngine:
             }
             priority_order = {"high": 0, "medium": 1, "low": 2}
             sorted_todos = sorted(todos, key=lambda td: priority_order.get(td.get("priority", "low"), 2))
-            for td in sorted_todos:
+            # 超出预算截掉低优先级尾部（排序后 low 在尾部）
+            for td in sorted_todos[:_todo_visible]:
                 s = td.get("status", "pending")
                 icon = status_icon.get(s, "☐")
                 color = status_color.get(s, JifyTheme.SUBTLE)

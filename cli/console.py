@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Dict, Optional
 
+from rich.cells import cell_len
 from rich.text import Text
 
 from agent_p2p import set_p2p_busy
@@ -289,8 +290,18 @@ class CLIConsole(BaseStreamConsumer):
 
         if name == "subagent_run":
             task_desc = args.get("task", "")
-            if len(task_desc) > 100:
-                task_desc = task_desc[:97] + "…"
+            # 按显示宽度截断保首部（中文占 2 列），整行不超过终端宽度，
+            # 否则 Live 激活期间 console.print 会把 Task 行折成多行
+            _avail = self._output.console.width - cell_len("Task(") - cell_len(")…")
+            if cell_len(task_desc) > _avail:
+                kept, used = [], 0
+                for ch in task_desc:
+                    cw = cell_len(ch)
+                    if used + cw > _avail - 1:
+                        break
+                    used += cw
+                    kept.append(ch)
+                task_desc = "".join(kept) + "…"
             self._output.queue_output(Text(f"Task({task_desc})…", style="bold white"))
 
             def _exec_subagent(tid, tname, targs):
