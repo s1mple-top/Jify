@@ -41,6 +41,8 @@ https://github.com/user-attachments/assets/68095fbc-9af2-4019-b8d9-512a754b2d6d
 | CVE-2025-2855     | eladmin 2.7    | 远程代码执行（RCE），由 Jify 发掘并验证 / Remote Code Execution (RCE), discovered and validated by Jify |
 | CVE-2025-2835     | oneblog 2.3.9  | 服务端请求伪造（SSRF），由 Jify 发掘并验证 / Server-Side Request Forgery (SSRF), discovered and validated by Jify |
 | CVE-2025-2833     | oneblog 2.3.9  | 正则表达式拒绝服务（ReDoS），由 Jify 发掘并验证 / Regular Expression Denial of Service (ReDoS), discovered and validated by Jify |
+| CVE-2026-120319   | PublicCMS 4.x/5.x/6.x | `publiccms-trade` 组件 `TradeRefundService.updateAmound` 对 `refundId` 未做归属校验，可越权访问他人退款记录（CWE-639），由 Jify 发掘并验证 / Missing ownership check on `refundId` in `TradeRefundService.updateAmound` (`publiccms-trade`) allows access to other users' refund records (CWE-639), discovered and validated by Jify |
+| CVE-2026-121583   | PublicCMS 5    | `TradePaymentService.pendingRefund` 对 `userId` 未做归属校验，可越权访问他人支付退款数据（CWE-639），由 Jify 发掘并验证 / Missing ownership check on `userId` in `TradePaymentService.pendingRefund` allows access to other users' payment refund data (CWE-639), discovered and validated by Jify |
 
 ## 安装 / Installation
 
