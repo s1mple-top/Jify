@@ -321,12 +321,12 @@ class CLIConsole(BaseStreamConsumer):
 
         if name.startswith("team_"):
             team_label = {
-                "team_delegate": "委派",
-                "team_delegate_parallel": "并行委派",
-                "team_broadcast": "广播",
-                "team_add_worker": "添加 Worker",
-                "team_remove_worker": "移除 Worker",
-                "team_status": "查询",
+                "team_delegate": "Delegate",
+                "team_delegate_parallel": "Delegate Parallel",
+                "team_broadcast": "Broadcast",
+                "team_add_worker": "Add Worker",
+                "team_remove_worker": "Delete Worker",
+                "team_status": "Status",
             }.get(name, "Team")
             self._output.queue_output(Text(""))
             self._output.queue_output(Text(f"⚙ {team_label}…", style="bold white"))

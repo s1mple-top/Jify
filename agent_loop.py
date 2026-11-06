@@ -756,8 +756,10 @@ class AgentLoop:
         # 轮次起点兜底：上一轮异常退出（中断 / API 报错）可能残留思考原文，
         # 不清空会被当作本轮首次请求的 extra_body.reasoning_content 发给模型
         console.last_reasoning_content = ""
-        from tools.approval import clear_break
+        from tools.approval import clear_break, clear_auto_approve
         clear_break()
+        # 轮次级免审批（审批时按 s）只在本轮内有效，轮次起点重置
+        clear_auto_approve()
 
         run_start = time.time()
 

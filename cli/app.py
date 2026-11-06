@@ -59,17 +59,18 @@ console = JifyTheme.create_console()
 
 # Slash 命令系统 — 输入 "/" 自动补全
 SLASH_COMMANDS: Dict[str, str] = {
-    "model": "切换模型          —  /model <model_name>",
-    "approve": "审批开关          —  /approve <yes|no>",
-    "resume": "加载历史对话      —  /resume <session_id>",
-    "sessions": "列出最近对话会话  —  /sessions",
-    "clear": "清除对话历史      —  /clear",
-    "help": "显示帮助信息      —  /help",
-    "hook": "显示hook信息      —  /hook",
-    "skill": "列出所有可用 skill  —  /skill",
-    "learn": "学习当前会话，沉淀为 skill  —  /learn",
-    "jify": "分析当前目录下的项目，生成Jify.md      —  /jify",
-    "exit": "退出程序          —  /exit",
+    "model": "切换模型 (switch model)  —  /model <model_name>",
+    "refresh_config": "重载 config.yaml (reload config)  —  /refresh_config",
+    "approve": "审批开关 (toggle approval)  —  /approve <yes|no>",
+    "resume": "加载历史对话 (load session)  —  /resume <session_id>",
+    "sessions": "列出最近对话会话 (list sessions)  —  /sessions",
+    "clear": "清除对话历史 (clear history)  —  /clear",
+    "help": "显示帮助信息 (show help)  —  /help",
+    "hook": "显示hook信息 (show hooks)  —  /hook",
+    "skill": "列出所有可用 skill (list skills)  —  /skill",
+    "learn": "学习当前会话，沉淀为 skill (learn from session)  —  /learn",
+    "jify": "分析当前目录下的项目，生成Jify.md (analyze project)  —  /jify",
+    "exit": "退出程序 (exit)  —  /exit",
 }
 
 
@@ -440,6 +441,48 @@ class JifyCLI:
             return response.content
 
         return summarize
+
+    def refresh_config(self) -> List[str]:
+        """重新加载 config.yaml，并原地更新运行中的配置（无需重启进程）。
+
+        原地改写 self.config 的字段：AgentLoop / TeamOrchestrator / 摘要器
+        持有的是同一个对象引用，改字段即整体生效。
+        当前已激活的模型若在新配置中仍存在则继续保留，否则回退到首个模型。
+
+        Returns:
+            供终端展示的结果行
+        """
+        import dataclasses
+        path = os.path.expanduser("~/.jify/config.yaml")
+        if not os.path.exists(path):
+            return [f"  ✗ 配置文件不存在: {path}"]
+        try:
+            new_cfg = AgentConfig.load_from_yaml(path)
+        except Exception as e:
+            return [f"  ✗ 加载失败: {str(e).splitlines()[0]}"]
+
+        prev_active = self.config.active_model_name
+        for f in dataclasses.fields(AgentConfig):
+            setattr(self.config, f.name, getattr(new_cfg, f.name))
+
+        lines: List[str] = []
+        if prev_active and self.config.activate_model(prev_active):
+            lines.append(f"  当前模型: {prev_active}")
+        else:
+            if prev_active:
+                lines.append(f"  ⚠ 原模型 {prev_active} 已不在配置中，回退到 {self.config.model}")
+            else:
+                lines.append(f"  当前模型: {self.config.model}")
+        lines.append(f"    provider: {self.config.provider}")
+        lines.append(f"    base_url: {self.config.base_url}")
+        lines.append(f"  可用模型: {', '.join(self.config.model_names) or '(无)'}")
+
+        # 自进化摘要器是用旧模型客户端闭包创建的，配置变更后需重建
+        try:
+            self.evolution.summarizer = self._create_summarizer()
+        except Exception:
+            pass
+        return lines
 
     def chat(self, user_input: str) -> None:
         """处理一轮对话（think 状态栏由 CLIConsole.consume_stream 内部渲染）"""
@@ -1103,8 +1146,14 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False,
                     divider()
                     continue
                 elif cmd == "help":
+                    items = []
                     for name, desc in SLASH_COMMANDS.items():
-                        meta(f"  /{name:<10} {desc}")
+                        label, _, usage = desc.partition("—")
+                        items.append((name, label.rstrip(), usage.strip()))
+                    width = max(_disp_width(label) for _, label, _ in items)
+                    for name, label, usage in items:
+                        pad = " " * (width - _disp_width(label) + 2)
+                        meta(f"  /{name:<15} {label}{pad}—  {usage}")
                     divider()
                     continue
                 elif cmd == "hook":
@@ -1225,6 +1274,11 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False,
                         meta(f"  已切换模型 → {arg}")
                         meta(f"    provider: {agent_cli.config.provider}")
                         meta(f"    base_url: {agent_cli.config.base_url}")
+                    divider()
+                    continue
+                elif cmd == "refresh_config":
+                    for line in agent_cli.refresh_config():
+                        meta(line)
                     divider()
                     continue
                 elif cmd == "approve":

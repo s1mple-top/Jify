@@ -36,10 +36,28 @@ _approval_queue: queue.Queue = queue.Queue()
 _consumer_started = False
 _consumer_lock = threading.Lock()
 _no_approve = False  # 免审批开关：True 时 request_approval 直接放行（--no-approve 启动）
+_auto_approve = False  # 轮次级免审批：审批时按 s(shift) 开启，本轮后续审批直接放行
 
 def set_approval_engine(engine: OutputEngine) -> None:
     global _engine
     _engine = engine
+
+
+def set_auto_approve(enabled: bool) -> None:
+    """开启/关闭轮次级免审批（审批时按 s/shift 触发）。"""
+    global _auto_approve
+    _auto_approve = enabled
+
+
+def is_auto_approve() -> bool:
+    """查询当前轮次是否已开启免审批。"""
+    return _auto_approve
+
+
+def clear_auto_approve() -> None:
+    """轮次起点重置轮次级免审批。"""
+    global _auto_approve
+    _auto_approve = False
 
 
 def set_no_approve(enabled: bool) -> None:
@@ -188,7 +206,7 @@ def _build_panel(tool_name: str, args_preview: str, preview: Optional[str],
         panel_content.append(_render_diff(preview))
         panel_content.append("─" * (width - 4) + "\n", style=JifyTheme.SUBTLE)
 
-    footer = "[Enter] yes    [n] no    [b] break"
+    footer = "[Enter] yes    [n] no    [b] break    [s] shift"
     if queue_len > 0:
         footer = f"[{queue_len + 1} 个审批排队]  " + footer
     panel_content.append(f"\n{footer}", style=JifyTheme.YELLOW)
@@ -217,7 +235,7 @@ def _print_fallback(tool_name: str, args_preview: str, preview: Optional[str],
         if len(preview.split("\n")) > 60:
             remaining = len(preview.splitlines()) - 60
             print(f"  │ ... ({remaining} more lines) ...{' ' * (width - 24 - len(str(remaining)))} │")
-    print(f"  │  [Enter] yes    [n] no    [b] break{' ' * (width - 35)}│")
+    print(f"  │  [Enter] yes    [n] no    [b] break    [s] shift{' ' * max(0, width - 48)}│")
     print(f"  ╰{'─' * width}╯")
     print()
 
@@ -262,7 +280,7 @@ def _read_approval_choice(tool_name: str, timeout: float = 120.0) -> bool:
         termios.tcflush(fd, termios.TCIFLUSH)
 
         while True:
-            prompt = f"  Approve [{tool_name}]? [Enter] yes / [n]o / [b]reak: "
+            prompt = f"  Approve [{tool_name}]? [Enter] yes / [n]o / [b]reak / [s]hift: "
             # 先清上一轮残留，再写 prompt；避免清掉用户对当前 prompt 的抢先输入
             termios.tcflush(fd, termios.TCIFLUSH)
             sys.stdout.write(prompt)
@@ -316,7 +334,11 @@ def _read_approval_choice(tool_name: str, timeout: float = 120.0) -> bool:
             if choice in ("b", "break"):
                 print("  [审批] ⊘ 中断循环\n")
                 raise ApprovalBreak(tool_name)
-            print("  无效输入，请按回车批准 / n(拒绝) / b(中断)")
+            if choice in ("s", "shift"):
+                set_auto_approve(True)
+                print("  [审批] ⇧ 本轮后续审批自动批准\n")
+                return True
+            print("  无效输入，请按回车批准 / n(拒绝) / b(中断) / s(本轮免审批)")
     finally:
         # 先尝试恢复进入审批前的终端状态；若获取失败则退化为 sane 兜底
         try:
@@ -420,6 +442,10 @@ def request_approval(tool_name: str, args: dict, preview: Optional[str] = None,
 
     # 免审批模式：直接放行，不打断长程任务
     if _no_approve:
+        return True
+
+    # 轮次级免审批（shift）：本轮内已由用户一次性授权
+    if _auto_approve:
         return True
 
     # queue串行，防止多个线程同时调用 input() 抢 stdin 导致竞态

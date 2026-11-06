@@ -110,6 +110,7 @@ Type `/` in a chat to trigger autocompletion:
 | 命令 / Command  | 说明 / Description                                           |
 | --------------- | ------------------------------------------------------------ |
 | `/model <name>` | 切换模型 / Switch model                                      |
+| `/refresh_config` | 重载 `~/.jify/config.yaml`，运行中即时生效，无需重启（新增模型等场景用 `/model` 切过去即可） / Reload `~/.jify/config.yaml` in place without restarting (e.g. after adding a new model, then use `/model` to switch to it) |
 | `/resume <id>`  | 恢复历史对话 / Resume a history session                      |
 | `/sessions`     | 列出最近对话会话 / List recent sessions                      |
 | `/clear`        | 清除对话历史 / Clear chat history                            |
