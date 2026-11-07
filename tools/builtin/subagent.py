@@ -56,8 +56,8 @@ def _build_whitelist_schemas() -> list:
             },
             "max_iterations": {
                 "type": "integer",
-                "description": "subagent 最大迭代次数。一次迭代 = 模型推理 → 执行工具 → 工具结果喂回模型，即「一轮对话」。单工具调用至少需要 2 次迭代（第 1 次执行工具，第 2 次把结果转成自然语言），复杂任务可能需要 5-10+ 次。默认 20，除非已知任务极简单，否则不要手动压低此值。",
-                "default": 20,
+                "description": "subagent 最大迭代次数。一次迭代 = 模型推理 → 执行工具 → 工具结果喂回模型，即「一轮对话」。单工具调用至少需要 2 次迭代（第 1 次执行工具，第 2 次把结果转成自然语言），复杂任务可能需要 5-10+ 次。默认 100，除非已知任务极简单，否则不要手动压低此值。",
+                "default": 100,
             },
         },
         "required": ["task"],
@@ -68,7 +68,7 @@ def _build_whitelist_schemas() -> list:
     # 15s 的默认档必然误杀；给足 15 分钟上限，仅作永久 hang 的兜底
     timeout=900,
 )
-def subagent_run(task: str, max_iterations: int = 20) -> str:
+def subagent_run(task: str, max_iterations: int = 100) -> str:
     """
     启动 subagent 执行指定任务。
 

@@ -51,7 +51,7 @@ class SubagentRunner:
         system_prompt: str,
         whitelist_schemas: List[Dict],
         whitelist_names: Set[str],
-        max_iterations: int = 20,
+        max_iterations: int = 100,
         on_progress: Optional[Callable[[str, Dict], None]] = None,
         interrupt_event: Optional[threading.Event] = None,
         history: Optional[List[Dict]] = None,

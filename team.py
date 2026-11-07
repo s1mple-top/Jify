@@ -81,7 +81,7 @@ class WorkerDef:
     worker_id: str
     system_prompt: str
     whitelist: Set[str]                        # 可用工具白名单
-    max_iterations: int = 20
+    max_iterations: int = 100
     current_task: Optional[str] = None         # 当前正在执行的任务 ID
     stats: Dict = field(default_factory=dict)  # {tasks_completed, total_elapsed}
 
@@ -123,7 +123,7 @@ class TeamWorker:
         config: Any,
         system_prompt: str,
         whitelist: Set[str],
-        max_iterations: int = 20,
+        max_iterations: int = 100,
     ):
         self.worker_id = worker_id
         # model_client 可以是实例，也可以是返回实例的 callable（延迟解析），
@@ -135,6 +135,10 @@ class TeamWorker:
         self.max_iterations = max_iterations
 
         self._task_queue: queue.Queue = queue.Queue()
+        # 正在执行中的标志：队列里的任务 qsize 可见，但 worker 线程 get 走之后、
+        # set_result 之前这段执行期队列已空，仅靠 qsize 会误判"空闲"，
+        # 导致并行分配把新任务堆给正在忙的 worker
+        self._executing = False
         self._result_events: Dict[str, threading.Event] = {}
         self._results: Dict[str, str] = {}
         self._thread: Optional[threading.Thread] = None
@@ -206,7 +210,9 @@ class TeamWorker:
             elif event_type == "thinking":
                 # 压成单行 + 只留尾部：新字符从右进、旧字符从左出，形成滚动效果。
                 # 不保留全文是刻意的，状态栏只提供「它此刻在想什么」的粗粒度感知。
-                seg = (data.get("text") or "").replace("\n", " ").replace("\r", " ")
+                # \t 必须一并替换：cell_len 按 1 列计宽而 rich 渲染时展开 1-8 列，
+                # 保留它会让 think 行实际渲染宽度超出列宽被 fold 成两行
+                seg = (data.get("text") or "").replace("\n", " ").replace("\r", " ").replace("\t", " ")
                 detail["think"] = (detail.get("think", "") + seg)[-_THINK_TAIL:]
             elif event_type == "token_update":
                 detail["sent_est"] = data.get("sent", 0)
@@ -321,11 +327,14 @@ class TeamWorker:
                 break
 
             task, future = item
+            self._executing = True
             try:
                 result = self._execute(task)
                 future.set_result(result)
             except Exception as e:
                 future.set_exception(e)
+            finally:
+                self._executing = False
 
     def _execute(self, task: TeamTask) -> str:
         """核心执行: 调 SubagentRunner.run()
@@ -447,7 +456,7 @@ class TeamWorker:
     @property
     def busy(self) -> bool:
         """是否正在执行任务"""
-        return self._task_queue.qsize() > 0
+        return self._executing or self._task_queue.qsize() > 0
 
     @property
     def stats(self) -> Dict:
@@ -526,7 +535,7 @@ class TeamLeader:
         worker_id: str,
         system_prompt: str,
         whitelist: Set[str],
-        max_iterations: int = 20,
+        max_iterations: int = 100,
     ) -> TeamWorker:
         """
         添加一个 Worker 并启动。
@@ -548,6 +557,11 @@ class TeamLeader:
                     f"以下工具不存在，请检查拼写: {', '.join(unknown)}；"
                     f"当前可用工具: {', '.join(sorted(registry.get_all_names()))}"
                 )
+
+            # 强制带上 load_skill：所有 Worker 的 system prompt 会追加「## 拥有的skill」
+            # 清单段（见 _effective_system_prompt），并能按需加载方法论。没有它，
+            # 委派挖洞/审计类任务时 Worker 拿不到 security-audit 等技能库。
+            whitelist = whitelist | {"load_skill"}
 
             worker = TeamWorker(
                 worker_id=worker_id,
@@ -640,12 +654,14 @@ class TeamLeader:
 
         result = w.submit_and_wait(task, timeout=timeout)
 
-        # 与 delegate_parallel 对齐：单 worker 委派结束后也清理状态行残留，
-        # 否则 _execute 写入的 completed/failed 记录会滞留到整轮 finalize()
+        # 与 delegate_parallel 对齐：单 worker 委派结束后清理状态行残留，
+        # 否则 _execute 写入的 completed/failed 记录会滞留到整轮 finalize()。
+        # 只清自己：并行多个 delegate 时全清会误删仍在跑的其他 Worker，
+        # 在跑者要等下一个进度事件才被写回，表现为状态行数量反复跳变。
         engine = get_output_engine()
         if engine:
-            engine.clear_team_workers()
-        _emit_team_update(None, None, clear=True)
+            engine.clear_team_worker(task.worker_id)
+        _emit_team_update(task.worker_id, None, clear=True)
 
         return result
 
@@ -714,17 +730,26 @@ class TeamLeader:
                     raw_results[t.id] = json.dumps({"error": "无可用的 Worker"})
                     continue
                 t.worker_id = w.worker_id
+                # 入队必须在调用线程同步完成：_pick_worker 靠队列 qsize 判空闲，
+                # 若推迟到 pool 线程再 put，本轮所有 pick 看到的都是"全空闲"，
+                # 任务会全部堆给第一个 worker。
+                future = w.submit(t)
                 register_killer(
                     f"team_delegate_parallel({t.worker_id})",
                     lambda _t=t: _cancel_team_task(_t),
                 )
-                futures[t.id] = pool.submit(w.submit_and_wait, t, timeout)
+                futures[t.id] = pool.submit(future.result, timeout)
 
             for task_id, fut in futures.items():
                 try:
                     raw_results[task_id] = fut.result(timeout=timeout + 5)
                 except TimeoutError as e:
-                    _cancel_team_task(task_by_id[task_id])
+                    # 原 submit_and_wait 超时路径会置 failed 状态；入队改为同步
+                    # submit 后超时在这里抛出，补齐等价的状态置位
+                    t_failed = task_by_id[task_id]
+                    _cancel_team_task(t_failed)
+                    t_failed.status = "failed"
+                    t_failed.error = f"任务超时 ({timeout}s)"
                     raw_results[task_id] = json.dumps({"error": f"任务超时: {e}"})
                 except Exception as e:
                     raw_results[task_id] = json.dumps({"error": str(e)})
@@ -826,7 +851,7 @@ class TeamOrchestrator:
         worker_id: str,
         system_prompt: str,
         whitelist: Set[str],
-        max_iterations: int = 20,
+        max_iterations: int = 100,
     ) -> TeamWorker:
         return self.leader.add_worker(worker_id, system_prompt, whitelist, max_iterations)
 

@@ -155,7 +155,8 @@ def team_status() -> str:
     name="team_add_worker",
     description=(
         "动态添加一个 Worker 到团队中。Worker 是预定义角色的子智能体, "
-        "各有独立的 system_prompt 和工具白名单。添加后立即可用。"
+        "各有独立的 system_prompt 和工具白名单。仅完成注册: 添加后处于空闲待命, "
+        "不会执行任何任务; 必须再调 team_delegate / team_delegate_parallel 下发 task 才会开始执行。"
     ),
     parameters={
         "type": "object",
@@ -175,8 +176,8 @@ def team_status() -> str:
             },
             "max_iterations": {
                 "type": "number",
-                "description": "最大迭代次数, 默认 20",
-                "default": 20,
+                "description": "最大迭代次数, 默认 100",
+                "default": 100,
             },
         },
         "required": ["worker_id", "system_prompt", "whitelist"],
@@ -188,7 +189,7 @@ def team_add_worker(
     worker_id: str,
     system_prompt: str,
     whitelist: list,
-    max_iterations: int = 20,
+    max_iterations: int = 100,
 ) -> str:
     leader = get_leader()
     if leader is None:
@@ -200,7 +201,7 @@ def team_add_worker(
             whitelist=set(whitelist),
             max_iterations=max_iterations,
         )
-        return json.dumps({"ok": f"Worker '{worker_id}' 已添加并启动"})
+        return json.dumps({"ok": f"Worker '{worker_id}' 已添加，空闲待命中（需 team_delegate 下发才开始执行）"})
     except ValueError as e:
         return json.dumps({"error": str(e)})
 

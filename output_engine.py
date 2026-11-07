@@ -246,6 +246,16 @@ class OutputEngine:
         with self._anim_lock:
             self._team_workers.clear()
 
+    def clear_team_worker(self, worker_id: str) -> None:
+        """清理单个 Worker 的状态槽位。
+
+        并行多个 team_delegate 时，各自结束只应清掉自己；全清会误删
+        仍在跑的其他 Worker 状态行（在跑者要等下一个进度事件才被写回，
+        表现为状态行数量反复跳变）。
+        """
+        with self._anim_lock:
+            self._team_workers.pop(worker_id, None)
+
     def set_subagent(self, key: str, info: Dict) -> None:
         """状态栏里更新某个 subagent 的实时状态（key 用线程 ident 区分并发实例）"""
         with self._anim_lock:
