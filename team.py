@@ -558,10 +558,11 @@ class TeamLeader:
                     f"当前可用工具: {', '.join(sorted(registry.get_all_names()))}"
                 )
 
-            # 强制带上 load_skill：所有 Worker 的 system prompt 会追加「## 拥有的skill」
-            # 清单段（见 _effective_system_prompt），并能按需加载方法论。没有它，
-            # 委派挖洞/审计类任务时 Worker 拿不到 security-audit 等技能库。
-            whitelist = whitelist | {"load_skill"}
+            # 强制带上 load_skill 与 write_file：load_skill 使所有 Worker 的
+            # system prompt 追加「## 拥有的skill」清单段（见 _effective_system_prompt），
+            # 并能按需加载方法论；write_file 保证任何 Worker 都具备落盘产出能力，
+            # 委派方无需在白名单里重复声明。
+            whitelist = whitelist | {"load_skill", "write_file"}
 
             worker = TeamWorker(
                 worker_id=worker_id,

@@ -424,6 +424,9 @@ class OutputEngine:
             _col_avail = max(16, (self.console.width - 3 * _n_cols) // _n_cols - 2)
             for wid, info in sorted(team_workers.items()):
                 task = info.get("task", "")
+                # 任务描述常为多行文本，Text 对 \n 强制断行且 no_wrap 挡不住，
+                # 先折叠空白压成单行，否则帧高随描述行数增长导致 Live 抖动
+                task = " ".join(task.split())
                 # 头部行 "⏳ wid  task" 也要按列宽截断，否则同样会被折行
                 task_avail = max(6, _col_avail - 6 - cell_len(wid))
                 if cell_len(task) > task_avail:
@@ -540,6 +543,8 @@ class OutputEngine:
             )
             for idx, (key, sa) in enumerate(ordered[:_sa_visible]):
                 task = sa.get("task", "")
+                # 同 team worker：多行任务描述会强制断行，先折叠空白
+                task = " ".join(task.split())
                 _start = sa.get("_start")
                 if _start is not None:
                     sa_elapsed = now_sa - _start

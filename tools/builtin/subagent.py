@@ -46,6 +46,10 @@ def _build_whitelist_schemas() -> list:
         "启动一个子智能体执行任务。subagent 只能使用: "
         "read_file, write_file, patch_file, exec, static_analysis, load_skill。"
         "subagent 复用主 Agent 的模型连接，在同一进程内同步执行，完成后自动销毁。"
+        "注意: subagent 有 15 分钟超时上限，超时后被终止且任务结果会被丢弃"
+        "（已落盘的文件改动会保留）。仅委派轻量级、可独立完成的小任务"
+        "（如审查单个文件、跑一次测试、定位一个 bug）；"
+        "大型任务请拆分为多个小任务分次委派，或由主 Agent 直接执行。"
     ),
     parameters={
         "type": "object",

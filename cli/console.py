@@ -290,6 +290,9 @@ class CLIConsole(BaseStreamConsumer):
 
         if name == "subagent_run":
             task_desc = args.get("task", "")
+            # 任务描述常为多行（\n 段落），cell_len("\n")==0 使宽度截断拦不住，
+            # rich 渲染时必然断行；先折叠空白压成单行再按宽度截断
+            task_desc = " ".join(task_desc.split())
             # 按显示宽度截断保首部（中文占 2 列），整行不超过终端宽度，
             # 否则 Live 激活期间 console.print 会把 Task 行折成多行
             _avail = self._output.console.width - cell_len("Task(") - cell_len(")…")
