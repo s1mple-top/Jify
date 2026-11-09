@@ -965,7 +965,7 @@ class OutputEngine:
             if row:
                 data_rows.append(row)
 
-        table = RichTable(box=rich_box.HEAVY)
+        table = RichTable(box=rich_box.HEAVY, show_lines=True)
         for header, align in zip(header_cells, alignments):
             table.add_column(
                 Text(header.strip(), justify=align),

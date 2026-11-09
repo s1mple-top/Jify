@@ -16,6 +16,7 @@ dependencies = [
     "pyyaml>=6.0",
     "requests>=2.33.1",
     "rich>=13.0",
+    "socksio>=1.0",
     "uvicorn>=0.30",
     "websockets>=16.0",
 ]
