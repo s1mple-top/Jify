@@ -115,7 +115,7 @@ class JifyTheme:
         "markdown.h2": "bold italic",
         "markdown.h3": "bold italic",
         "markdown.block_quote": "italic default",
-        "markdown.code": "italic default",
+        "markdown.code": "bold default",
         "markdown.strong": "bold default",
         "markdown.emphasis": "italic default",
         "markdown.item.bullet": "default",
@@ -938,7 +938,7 @@ class OutputEngine:
             text = text[:-1]
         text = re.sub(r'\*\*(.+?)\*\*', r'[bold]\1[/bold]', text)
         text = re.sub(r'\*(.+?)\*', r'[italic]\1[/italic]', text)
-        text = re.sub(r'`(.+?)`', r'[italic]\1[/italic]', text)
+        text = re.sub(r'`(.+?)`', r'[bold]\1[/bold]', text)
         return Text.from_markup(text, emoji=False)
 
     def _build_rich_table(self, table_text: str) -> RichTable:
