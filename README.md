@@ -45,6 +45,12 @@ https://github.com/user-attachments/assets/68095fbc-9af2-4019-b8d9-512a754b2d6d
 | CVE-2026-121583   | PublicCMS 5    | `TradePaymentService.pendingRefund` 对 `userId` 未做归属校验，可越权访问他人支付退款数据（CWE-639），由 Jify 发掘并验证 / Missing ownership check on `userId` in `TradePaymentService.pendingRefund` allows access to other users' payment refund data (CWE-639), discovered and validated by Jify |
 | CVE-2026-125082   | sunkaifei FlyCms | XSS 替代语法未正确中和，可绕过过滤注入脚本（CWE-79/CWE-87），由 Jify 发掘并验证 / Improper neutralization of alternate XSS syntax allows bypassing filters to inject script (CWE-79/CWE-87), discovered and validated by Jify |
 
+## Tsecbench AK ALL
+
+<img width="3088" height="440" alt="image" src="https://github.com/user-attachments/assets/dfb53246-fdde-4212-8d11-dd97b08f7964" />
+
+<img width="2856" height="980" alt="image" src="https://github.com/user-attachments/assets/187ccd9d-1831-4f1c-b53a-1cea32750ab1" />
+
 ## 安装 / Installation
 
 ```bash
