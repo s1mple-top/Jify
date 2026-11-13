@@ -10,6 +10,7 @@ import re
 import threading
 import termios
 import time
+import unicodedata
 from typing import Any, Dict, Optional
 
 from rich.console import Console as RichConsole, Group
@@ -38,7 +39,7 @@ _TEAM_BOX = rich_box.Box(
 )
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
-_TABLE_SEP_RE = re.compile(r'^\s*\|[-\s:]+\|')
+_TABLE_SEP_RE = re.compile(r'^\s*\|(?:\s*:?-+:?\s*\|)+\s*$')
 # 代码围栏起始行：``` 或 ~~~（允许带语言标识和缩进）
 _FENCE_RE = re.compile(r'^\s*(`{3,}|~{3,})')
 _EMOJI_RE = re.compile(
@@ -66,6 +67,31 @@ _EMOJI_RE = re.compile(
 
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
+
+
+# 零宽字符与变体选择符不占显示位
+_ZERO_WIDTH = frozenset('\u200b\u200c\u200d\ufe0f')
+
+
+def _cell_display_width(cell: str) -> int:
+    """估算单元格在终端里的显示宽度：宽字符/全角计 2，其余计 1。"""
+    return sum(
+        2 if unicodedata.east_asian_width(ch) in ('W', 'F') else 1
+        for ch in cell
+        if ch not in _ZERO_WIDTH and not unicodedata.combining(ch)
+    )
+
+
+def _cell_est_lines(cell: str, budget: int) -> float:
+    """估算单元格折行后占几行，用于判断是否该把表格降级成键值列表。
+
+    含宽字符（中日韩、全角标点、emoji）的单元格沿用「字符数×2」口径：中文表格的
+    降级分界点因此与改造前完全一致，避免波及已调好的中英混排效果。纯半角单元格
+    改用精确显示宽度，否则纯 ASCII 内容会被高估一倍而提前降级成键值列表。
+    """
+    width = _cell_display_width(cell)
+    n_chars = len(cell)
+    return (n_chars * 2 if width != n_chars else width) / max(1, budget)
 
 
 # 全局终端模式锁：保护所有 tcgetattr/tcsetattr 操作。
@@ -599,7 +625,7 @@ class OutputEngine:
 
         if todos:
             status_icon = {
-                "completed": "☒",
+                "completed": "☑",
                 "in_progress": "◐",
                 "pending": "☐",
                 "cancelled": "✗",
@@ -941,7 +967,7 @@ class OutputEngine:
         text = re.sub(r'`(.+?)`', r'[bold]\1[/bold]', text)
         return Text.from_markup(text, emoji=False)
 
-    def _build_rich_table(self, table_text: str) -> RichTable:
+    def _build_rich_table(self, table_text: str) -> RichTable | list[Text]:
         lines = table_text.strip().split('\n')
         if len(lines) < 2:
             return RichTable()
@@ -965,13 +991,48 @@ class OutputEngine:
             if row:
                 data_rows.append(row)
 
-        table = RichTable(box=rich_box.SQUARE, show_lines=True)
+        table = RichTable(
+            box=rich_box.SIMPLE_HEAD, show_lines=False, padding=(0, 1), expand=False,
+        )
+        # 滑动列宽上限：终端宽均分防溢出（窄），42 封顶防宽度竞争（宽），
+        # 8 保底防列消失（超窄）；实际列宽 = clamp(内容宽, min_width, max_width)
+        n_cols = max(1, len(header_cells))
+        col_max = min(42, max(8, self._console.width // n_cols - 2))
+        # 兜底降级：列预算太窄（每列 < 10 显示列 ≈ 5 个汉字）或折行爆炸
+        # （单格要撕 8 行以上）时，键值列表可读性优于碎行表格
+        col_budget = self._console.width // n_cols - 2
+        est_lines_per_cell = max(
+            (_cell_est_lines(c, col_budget) for row in data_rows for c in row),
+            default=0,
+        )
+        if n_cols >= 2 and (col_budget < 10 or est_lines_per_cell > 8):
+            fallback: list[Text] = []
+            for row in data_rows:
+                line = Text()
+                parts = 0
+                for j in range(min(len(row), n_cols)):
+                    val = row[j].strip()
+                    if not val:
+                        continue
+                    if parts:
+                        line.append(" | ")
+                    # 表头为空（如首列留空的对照表）时不输出 ": value" 这种畸形前缀
+                    head = header_cells[j].strip() if j < len(header_cells) else ''
+                    if head:
+                        line.append(f"{head}: ")
+                    line.append_text(self._markdown_cell_to_text(val))
+                    parts += 1
+                if parts:
+                    fallback.append(line)
+            if fallback:
+                return fallback
         for header, align in zip(header_cells, alignments):
             table.add_column(
                 Text(header.strip(), justify=align),
                 overflow="fold",
                 no_wrap=False,
                 min_width=4,
+                max_width=col_max,
                 justify=align,
             )
 
@@ -1049,7 +1110,12 @@ class OutputEngine:
             else:
                 table = self._build_rich_table(content)
                 if table:
-                    renderables.append(table)
+                    if isinstance(table, list):
+                        # 降级键值列表：逐行 Text，避免列表对象被当作 renderable
+                        for ln in table:
+                            renderables.append(ln if isinstance(ln, Text) else Text(ln))
+                    else:
+                        renderables.append(table)
 
         return renderables
 
