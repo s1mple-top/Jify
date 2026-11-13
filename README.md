@@ -2,11 +2,13 @@
 
 Jify Agent（Self-evolving harness Agent）是一款通用智能体，运行在您自己的设备上的个人 AI 助手。它可以帮你完成您需要的编程任务、安全排查（漏洞挖掘【黑白盒分析】）、代码分析、CTF、渗透测试。
 
-Jify的主要能力集中在 vibecoding，安全能力仅作为分支能力提供，可用于在vibecoding之后本地自查安全风险，避免携带风险发布上线。
+Jify的主要能力集中在 vibecoding，安全能力仅作为分支能力提供，可用于在vibecoding之后本地自查安全风险，避免携带风险发布上线。但在实际安全能力测试中，Jify的安全能力也超乎想象。在腾讯-tsecbench上进行安全能力测评几乎近满分的成绩 99.55/100 ，完全可以用来日常安全工作使用。
 
 Jify Agent (Self-evolving harness Agent) is a general-purpose intelligent agent — a personal AI assistant that runs on your own device. It helps you with programming tasks, security audits (vulnerability discovery via black-box/white-box analysis), code analysis, CTF challenges, and penetration testing. 
 
-Jify’s primary capabilities center on "vibecoding," with security features offered as a supplementary function; these can be used for local self-assessment of security risks following the vibecoding process, helping to ensure that code is not deployed with latent vulnerabilities.
+Jify’s primary focus is on "vibecoding," with security features offered as a supplementary capability—allowing users to perform local security checks after the coding process to ensure that no risks are introduced before deployment. However, in actual security performance evaluations, Jify’s capabilities proved to be exceptionally strong. It achieved a near-perfect score of 99.55/100 on the Tencent-tsecbench, demonstrating that it is fully capable of supporting routine security tasks.
+
+
 
 开始体验Jify，并且你将会喜欢上它
 
