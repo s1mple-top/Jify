@@ -440,6 +440,23 @@ class OutputEngine:
                 t.append("\n")
                 t.append(f"  ⚙ {wf['name']} › {' · '.join(parts)}", style=JifyTheme.SUBTLE)
 
+        # 行数预算分配：状态行(1) + workflow 行先扣除，再扣 team 表固定开销，
+        # 剩下的按 stream / subagent / todos 的顺序分配。
+        # team 表固定开销 = 空行 + 标题 + 统计 + think + token + 表尾 = 6 行，
+        # 不含活动流行；活动流条数按剩余高度动态收缩（原先固定 10 条，小窗口
+        # 会顶穿终端高度 → Live 光标上移越界 → 整屏滚动爆闪）。
+        _n_sa = len(subagents) if subagents else 0
+        _n_todo = len(todos) if todos else 0
+        _team_fixed = 6 if team_workers else 0
+        _tip_lines = 3 if tip else 0          # tips 正文 1 行 + 前后空行 2 行
+        _remaining = _max_lines - 1 - _wf_lines - _team_fixed - _tip_lines
+        if team_workers:
+            # subagent / todos 每条占 1 行，先给它们留位，剩余才给活动流；
+            # 至少留 1 条（worker 在跑就必须能看到它最后干了什么）
+            _stream_room = _remaining - _n_sa - _n_todo
+            _MAX_STREAM_LINES = max(1, min(_MAX_STREAM_LINES, _stream_room))
+            _remaining -= _MAX_STREAM_LINES
+
         if team_workers:
             now = time.time()
             team_table = RichTable(box=_TEAM_BOX, show_header=False, padding=(0, 1), expand=False)
@@ -536,16 +553,15 @@ class OutputEngine:
                     cell.append("\n", style=JifyTheme.SUBTLE)
                     cell.append(f"  ↑{self.fmt_tokens(sent_est // 2)} ↓{self.fmt_tokens(recv_est // 2)}", style=JifyTheme.SUBTLE)
                 cells.append(cell)
-                # ellipsis 兜底：即使个别内容算宽仍有偏差，也只截断不折行
-                team_table.add_column(overflow="ellipsis")
+                # ellipsis 兜底：即使个别内容算宽仍有偏差，也只截断不折行。
+                # 必须带 no_wrap：rich 的 overflow="ellipsis" 只在 no_wrap 生效，
+                # 缺了它列被压窄时每行会 fold 成 2-3 行，帧高随 worker 数膨胀
+                # （实测 6 worker × 10 条活动流：42 行，终端仅 24 行）。
+                team_table.add_column(overflow="ellipsis", no_wrap=True)
             team_table.add_row(*cells)
 
-        # 行数预算分配：header(1) + workflow 行先扣除，subagent 优先占用剩余
-        # 预算（实时活动主体），todos 存在时保底留 1 行；subagent 超出部分
-        # 折叠成 1 行摘要，todos 超出截掉低优先级尾部。
-        _remaining = _max_lines - 1 - _wf_lines
-        _n_sa = len(subagents) if subagents else 0
-        _n_todo = len(todos) if todos else 0
+        # 行数预算：subagent 优先占用剩余预算（实时活动主体），todos 存在时
+        # 保底留 1 行；subagent 超出部分折叠成 1 行摘要，todos 超出截掉低优先级尾部。
         if _n_sa + _n_todo > _remaining:
             _sa_slot = _remaining - 1 if _n_todo else _remaining
             _sa_visible = min(_n_sa, max(0, _sa_slot))
@@ -671,7 +687,9 @@ class OutputEngine:
                 console=self._console,
                 refresh_per_second=60,
                 transient=True,
-                vertical_overflow="visible",
+                # 兜底：status_line 已按终端高度分配行数预算，理论上不会超；
+                # 但 tip / 估算偏差仍可能溢出，此时裁掉而不是让光标上移越界
+                vertical_overflow="ellipsis",
             )
             self._live.start()
             self._live_active = True
@@ -699,7 +717,7 @@ class OutputEngine:
                 console=self._console,
                 refresh_per_second=60,
                 transient=True,
-                vertical_overflow="visible",
+                vertical_overflow="ellipsis",
             )
             self._live.start()
             self._live_active = True
@@ -972,6 +990,57 @@ class OutputEngine:
             # 表格只是展示，降级成纯文本，不能让整轮对话被打死。
             return Text(raw)
 
+    def _natural_col_widths(self, header_cells: list, data_rows: list, n_cols: int) -> list:
+        """各列一列放完所需的最小显示宽度（取表头与所有数据格的最大值）。
+
+        宽度取自 _markdown_cell_to_text（已剥离 emoji 与 Markdown 标记），
+        用 cell_len 而非 len，中文与全角标点按 2 计。
+        """
+        nat = [1] * n_cols
+        for j in range(n_cols):
+            w = self._markdown_cell_to_text(header_cells[j].strip()).cell_len
+            for row in data_rows:
+                if j < len(row):
+                    w = max(w, self._markdown_cell_to_text(row[j].strip()).cell_len)
+            nat[j] = max(1, w)
+        return nat
+
+    def _compute_col_caps(self, nat: list, n_cols: int) -> list:
+        """按各列内容宽度分配列宽上限。
+
+        做法是「等上限注水」：找一个统一上限 T，让每列取 min(自然宽, T)
+        加起来不超过可用宽度。短列因此能拿到完整宽度一行放完，折行压力
+        全部集中在最长的列上，而不是像均分上限那样把所有列一起砍碎。
+        """
+        # rich 每列实占 = 列宽 + 左右 padding 2 + 列间分隔符 1，按 3 计，
+        # 否则预算偏大，末尾几列会被挤成 0 宽直接不显示
+        avail = self._console.width - 3 * n_cols
+        if avail < 4 * n_cols:
+            # 可用宽度连 min_width=4 都放不下时均分缩小，避免整列被挤掉
+            per = max(1, avail // n_cols)
+            return [per] * n_cols
+        if sum(nat) <= avail:
+            return [max(4, w) for w in nat]
+
+        lo, hi, best = 4, max(nat), 4
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if sum(min(w, mid) for w in nat) <= avail:
+                best, lo = mid, mid + 1
+            else:
+                hi = mid - 1
+        caps = [min(w, best) for w in nat]
+
+        # 余数补给缺口最大的列（缩短最长列的折行行数）
+        rem = avail - sum(caps)
+        while rem > 0:
+            i = max(range(n_cols), key=lambda k: nat[k] - caps[k])
+            if nat[i] <= caps[i]:
+                break
+            caps[i] += 1
+            rem -= 1
+        return caps
+
     def _build_rich_table(self, table_text: str) -> RichTable | list[Text]:
         lines = table_text.strip().split('\n')
         if len(lines) < 2:
@@ -999,18 +1068,24 @@ class OutputEngine:
         table = RichTable(
             box=rich_box.SIMPLE_HEAD, show_lines=False, padding=(0, 1), expand=False,
         )
-        # 滑动列宽上限：终端宽均分防溢出（窄），42 封顶防宽度竞争（宽），
-        # 8 保底防列消失（超窄）；实际列宽 = clamp(内容宽, min_width, max_width)
+        # 列宽上限按各列内容宽度分配（放得下不折行，放不下按比例压缩），
+        # 不再用「终端宽 ÷ 列数」等分——那会把长列硬砍成碎行。
         n_cols = max(1, len(header_cells))
-        col_max = min(42, max(8, self._console.width // n_cols - 2))
-        # 兜底降级：列预算太窄（每列 < 10 显示列 ≈ 5 个汉字）或折行爆炸
-        # （单格要撕 8 行以上）时，键值列表可读性优于碎行表格
-        col_budget = self._console.width // n_cols - 2
+        nat = self._natural_col_widths(header_cells, data_rows, n_cols)
+        caps = self._compute_col_caps(nat, n_cols)
+        # 兜底降级：三选一即降级为键值列表，可读性都优于碎行表格
+        #   1) 折行爆炸（单格要撕 8 行以上）
+        #   2) 终端太窄（每列不足 10 显示列 ≈ 5 个汉字）
+        #   3) 内容超出可用宽度且最窄列已被压到 10 显示列以下
+        avail = self._console.width - 3 * n_cols
+        compressed = sum(nat) > avail and min(caps) < 10
+        narrow = self._console.width // n_cols - 2 < 10
         est_lines_per_cell = max(
-            (_cell_est_lines(c, col_budget) for row in data_rows for c in row),
+            (_cell_est_lines(c, caps[j]) for row in data_rows
+             for j, c in enumerate(row[:n_cols])),
             default=0,
         )
-        if n_cols >= 2 and (col_budget < 10 or est_lines_per_cell > 8):
+        if n_cols >= 2 and (est_lines_per_cell > 8 or narrow or compressed):
             fallback: list[Text] = []
             for row in data_rows:
                 line = Text()
@@ -1031,17 +1106,16 @@ class OutputEngine:
                     fallback.append(line)
             if fallback:
                 return fallback
-        for header, align in zip(header_cells, alignments):
+        for j, (header, align) in enumerate(zip(header_cells, alignments)):
             table.add_column(
                 Text(header.strip(), justify=align),
                 overflow="fold",
                 no_wrap=False,
-                min_width=4,
-                max_width=col_max,
+                min_width=min(4, caps[j] if j < len(caps) else 4),
+                max_width=caps[j] if j < len(caps) else 4,
                 justify=align,
             )
 
-        n_cols = len(header_cells)
         for row in data_rows:
             while len(row) < n_cols:
                 row.append('')
@@ -1091,6 +1165,12 @@ class OutputEngine:
                 data_lines = []
                 j = i + 1
                 while j < len(lines) and lines[j].strip().startswith('|'):
+                    # 紧邻的两张表之间没有空行时，下一张表的表头行也以 | 开头，
+                    # 紧跟其后的就是分隔行。遇到「| 开头的行 + 分隔行」这个组合
+                    # 就停止收集，否则两张表会被拼成一张，第二张的表头与分隔行
+                    # 变成第一张的数据行。
+                    if j + 1 < len(lines) and _TABLE_SEP_RE.match(lines[j + 1]):
+                        break
                     data_lines.append(lines[j])
                     j += 1
 
