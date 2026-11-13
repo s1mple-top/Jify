@@ -18,7 +18,7 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.table import Table as RichTable
 from rich import box as rich_box
-from rich.markup import escape
+from rich.markup import escape, MarkupError
 from rich.text import Text
 from rich.cells import cell_len
 from rich.theme import Theme
@@ -39,7 +39,7 @@ _TEAM_BOX = rich_box.Box(
 )
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
-_TABLE_SEP_RE = re.compile(r'^\s*\|(?:\s*:?-+:?\s*\|)+\s*$')
+_TABLE_SEP_RE = re.compile(r'^\s*\|(?:\s*:?-+:?\s*\|)+\s*$|^\s*\|(?:\s*:?-+:?\s*\|)*\s*:?-+:?\s*$')
 # 代码围栏起始行：``` 或 ~~~（允许带语言标识和缩进）
 _FENCE_RE = re.compile(r'^\s*(`{3,}|~{3,})')
 _EMOJI_RE = re.compile(
@@ -965,7 +965,12 @@ class OutputEngine:
         text = re.sub(r'\*\*(.+?)\*\*', r'[bold]\1[/bold]', text)
         text = re.sub(r'\*(.+?)\*', r'[italic]\1[/italic]', text)
         text = re.sub(r'`(.+?)`', r'[bold]\1[/bold]', text)
-        return Text.from_markup(text, emoji=False)
+        try:
+            return Text.from_markup(text, emoji=False)
+        except MarkupError:
+            # 单元格内 * 与 ` 混排时，上面的顺序替换可能凑出错配标签而抛异常；
+            # 表格只是展示，降级成纯文本，不能让整轮对话被打死。
+            return Text(raw)
 
     def _build_rich_table(self, table_text: str) -> RichTable | list[Text]:
         lines = table_text.strip().split('\n')
