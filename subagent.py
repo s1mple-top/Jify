@@ -148,6 +148,7 @@ class SubagentRunner:
                             on_progress("token_update", {"sent": sent_est, "recv": recv_est})
 
                     if chunk.tool_call_deltas:
+                        tool_token_delta = 0
                         for tc in chunk.tool_call_deltas:
                             idx = tc.index
                             if idx not in tool_call_chunks:
@@ -159,8 +160,17 @@ class SubagentRunner:
                                 tool_call_chunks[idx]["id"] = tc.id
                             if tc.name:
                                 tool_call_chunks[idx]["function"]["name"] = tc.name
+                                tool_token_delta += len(tc.name)
                             if tc.arguments:
                                 tool_call_chunks[idx]["function"]["arguments"] += tc.arguments
+                                tool_token_delta += len(tc.arguments)
+                        # 工具调用的 name/arguments 同样是模型输出，按原始字符数计入 recv，
+                        # 与主 Agent 的 _on_tool_token 口径一致；逐 delta 上报会频繁刷新
+                        # 状态行，这里每个 chunk 汇总上报一次
+                        if tool_token_delta:
+                            recv_est += tool_token_delta
+                            if on_progress:
+                                on_progress("token_update", {"sent": sent_est, "recv": recv_est})
 
                 if stream_cancelled:
                     # 显式关闭生成器，立即释放底层 HTTP 连接，不等 GC
