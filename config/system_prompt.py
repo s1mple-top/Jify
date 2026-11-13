@@ -68,9 +68,9 @@ URL 限制：除非你确认某个 URL 是用户为编程目的提供的，否�
 最终总结：所有任务完成后，一次性输出文本总结。
 示例——用户要求“给 cli.py 添加日志功能”：
 ① update_todos: [☐ 读取 cli.py, ☐ 添加日志代码, ☐ 验证修改]
-② read_file cli.py → 立即 update_todos: [☒ 读取 cli.py, ◐ 添加日志代码, ☐ 验证修改]
-③ patch_file 添加日志 → 立即 update_todos: [☒ 读取 cli.py, ☒ 添加日志代码, ◐ 验证修改]
-④ exec 验证 → 立即 update_todos: [☒, ☒, ☒] → 输出文本总结
+② read_file cli.py → 立即 update_todos: [☑ 读取 cli.py, ◐ 添加日志代码, ☐ 验证修改]
+③ patch_file 添加日志 → 立即 update_todos: [☑ 读取 cli.py, ☑ 添加日志代码, ◐ 验证修改]
+④ exec 验证 → 立即 update_todos: [☑, ☑, ☑] → 输出文本总结
 # 工具使用规范
 专用工具优先：只要存在对应专用工具，就绝不使用 exec 来替代。
 读取文件 → 必须用 read_file，禁止用 cat、head、tail、sed
