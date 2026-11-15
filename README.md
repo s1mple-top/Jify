@@ -2,11 +2,11 @@
 
 Jify Agent（Self-evolving harness Agent）是一款通用智能体，运行在您自己的设备上的个人 AI 助手。它可以帮你完成您需要的编程任务、安全排查（漏洞挖掘【黑白盒分析】）、代码分析、CTF、渗透测试。
 
-Jify 的核心侧重点在于“氛围编程”（vibecoding），安全功能则作为一项辅助能力——用户可在编码完成后进行本地安全检查，确保在部署前提前发现某些潜在风险。然而，在实际的安全性能评估中，Jify 展现出了极其强劲的能力；在 Tencent-tsecbench V1 测试中取得了 99.55 分（满分 100 分）和 Tencent-tsecbench V2 测试中取得了 69.82 分（满分100分）【 中国 Top-4 】的近乎完美的成绩，证明其完全有能力胜任日常的安全保障任务。
+Jify 的核心侧重点在于“氛围编程”（vibecoding），安全功能则作为一项辅助能力——用户可在编码完成后进行本地安全检查，确保在部署前提前发现某些潜在风险。然而，在实际的安全性能评估中，Jify 展现出了极其强劲的能力；在 Tencent-tsecbench V1 测试中取得了 99.55 分（满分 100 分）和 Tencent-tsecbench V2 测试中取得了 69.82 分（满分100分）【 TsecBench V2 中国 Top-4 】的近乎完美的成绩，证明其完全有能力胜任日常的安全保障任务。
 
 Jify Agent (Self-evolving harness Agent) is a general-purpose intelligent agent — a personal AI assistant that runs on your own device. It helps you with programming tasks, security audits (vulnerability discovery via black-box/white-box analysis), code analysis, CTF challenges, and penetration testing. 
 
-Jify’s primary focus is on "vibecoding," with security features serving as a supplementary capability—users can perform local security checks after coding to identify potential risks before deployment. In actual security performance evaluations, however, Jify has demonstrated exceptional strength: it achieved a near-perfect score of 99.55 out of 100 in the Tencent-tsecbench V1 benchmark, and a score of 69.82 out of 100 in Tencent-tsecbench V2—ranking among the top 4 in China—which proves it is fully capable of handling routine security assurance tasks.
+Jify’s primary focus is on "vibecoding," with security features serving as a supplementary capability—users can perform local security checks after coding to identify potential risks before deployment. In actual security performance evaluations, however, Jify has demonstrated exceptional strength: it achieved a near-perfect score of 99.55 (out of 100) on the Tencent-tsecbench V1 benchmark, and a score of 69.82 (out of 100) on the Tencent-tsecbench V2 benchmark—placing it among the top 4 in China on the latter. These results confirm that Jify is fully capable of handling routine security assurance tasks.
 
 
 
