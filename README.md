@@ -59,11 +59,9 @@ https://github.com/user-attachments/assets/68095fbc-9af2-4019-b8d9-512a754b2d6d
 
 ## Tsecbench V2 Top4 in China（Achieve excellent results with minimal token consumption in large models.）
 
-<img width="1410" height="467" alt="image" src="https://github.com/user-attachments/assets/1d984815-652b-4f91-a19a-34b063031015" />
+<img width="2746" height="1030" alt="image" src="https://github.com/user-attachments/assets/7450cc75-5e73-4273-9e4d-4d0651e885d0" />
 
 <img width="2640" height="912" alt="image" src="https://github.com/user-attachments/assets/9ad9c126-7f89-41c9-a124-2575c4c0f38a" />
-
-<img width="2546" height="1360" alt="image" src="https://github.com/user-attachments/assets/e61b590b-b2b5-4713-ae90-cee995c6d230" />
 
 
 ## 安装 / Installation
