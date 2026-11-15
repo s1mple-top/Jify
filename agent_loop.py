@@ -444,11 +444,17 @@ class AgentLoop:
         self._session_messages: List[Message] = []
         self._session_messages_lock = threading.Lock()
         self._session_id: Optional[str] = None
+        # 保护 _session_id 的「检查-创建-赋值」序列：save_conversation 与
+        # _persist_stream 可能在不同线程并发执行（gateway 断开时 save 走
+        # to_thread，而 agent.run 仍在另一线程持续写 stream），无锁会导致
+        # 两边同时看到 None、各建一个 session，stream 与 messages 挂到不同 id 上
+        self._session_id_lock = threading.Lock()
         self._resume_messages: List[Message] = []  # /resume 加载的历史消息
         self._last_api_error: Optional[str] = None
         self._emergency_count: int = 0  # 本轮紧急压缩累计次数，run() 开始时复位（见 emergency_compress_limit）
         self._turn_start_idx: int = 0  # 本轮新增消息的起始索引（折叠前缀时保留尾部）
         self._turn_archived: bool = True  # 本轮消息是否已归档进 _session_messages（True=无待归档）
+        self._dirty: bool = False  # 自上次落库后是否有新增归档，False 时 save_conversation 直接跳过
         # 单轮长程折叠：分组与保留预算都在压缩时现算（按 assistant 消息起点
         # 切分 API 轮次），不再维护迭代块边界索引，省掉平移/失效逻辑
         # 压缩前最近读取过的文件路径，折叠后作为「召回提示」写进摘要消息
@@ -499,6 +505,11 @@ class AgentLoop:
             self._summary_cooldown_until = 0.0
         with self._session_messages_lock:
             self._session_messages.clear()
+            self._dirty = False
+        # /clear 语义是「重来」，后续保存应写入新会话，不覆盖已入库的旧记录；
+        # 同时让「clear 后未聊天就退出」的保存走 return None 路径（CLI 不再误报可 resume）
+        with self._session_id_lock:
+            self._session_id = None
 
     def clear_reasoning_content(self) -> None:
         """切换模型后清空历史消息中的 reasoning_content，避免跨供应商残留污染。
@@ -520,6 +531,33 @@ class AgentLoop:
                 m.thinking_blocks = None
 
     # 会话持久化
+    def _ensure_session(self) -> Optional[str]:
+        """返回当前会话 id，不存在则创建。唯一允许写 _session_id 的入口。
+
+        用双检锁把「检查-创建-赋值」收敛成一次串行的原子操作：单会话内多个
+        线程（save 的 to_thread 工作线程、run 内的 stream 写线程）同时首次
+        落库时，只有一个能真正创建，其余拿到同一个结果。
+
+        创建时的 SQLite IO 在持锁期间执行（只发生一次），避免出现
+        「先放锁再创建」被另一线程插队的问题。失败返回 None，调用方按需降级。
+        """
+        sid = self._session_id
+        if sid is not None:
+            return sid
+        with self._session_id_lock:
+            if self._session_id is not None:   # 二次检查：锁外等待期间可能已被建好
+                return self._session_id
+            from storage.db import get_db
+            try:
+                self._session_id = get_db().create_session(
+                    jify_name="cli",
+                    model=getattr(self.config, "model", ""),
+                )
+            except Exception:
+                logger.debug("ensure_session failed", exc_info=True)
+                return None
+            return self._session_id
+
     def save_conversation(self) -> Optional[str]:
         """将当前会话全部消息写入 SQLite，返回 session_id。
 
@@ -527,18 +565,26 @@ class AgentLoop:
         - 保留 user 消息和 assistant 文本回复
         - assistant 的 tool_calls 转为文本描述合并到 content（不保留原始 tool_calls 字段）
         - 跳过 system / tool 消息（system 在 resume 时重建，tool 结果不保存）
+
+        取数来源是 self.messages（当前活上下文）而非 _session_messages（本轮增量池）：
+        落库侧 save_messages 是 DELETE+INSERT 全量覆盖，只有传入完整历史才不会
+        在第二次保存时把之前的轮次删掉（/resume 后继续对话即触发）。
+        _session_messages 只用于 dirty 判定——决定要不要写，不决定写什么。
+        压缩折叠后的原文由 append-only 的 stream 表保全，messages 表存活上下文快照。
         """
         from storage.db import get_db
 
         with self._session_messages_lock:
-            messages = list(self._session_messages)
+            dirty = self._dirty
 
+        # 自上次保存后无新增归档（gateway 切会话/刷新页面等高频断开路径）：直接跳过。
+        # 无变化时重写纯属白做 IO，还会在事件循环里冻结其他请求。
+        if not dirty:
+            return self._session_id
+
+        messages = [m for m in self.messages if m.role != "system"]
         if not messages:
-            # 兜底：异常路径可能跳过归档（_session_messages 为空），回退到内存中
-            # 的完整消息序列（resume 历史 + 本轮），避免整轮对话丢失且无法 /resume
-            messages = [m for m in self.messages if m.role != "system"]
-            if not messages:
-                return None
+            return None
 
         raw = []
         for m in messages:
@@ -560,20 +606,19 @@ class AgentLoop:
             raw.append({"role": m.role, "content": content})
 
         db = get_db()
-        if self._session_id is None:
-            self._session_id = db.create_session(
-                jify_name="cli",
-                model=getattr(self.config, "model", ""),
-            )
+        session_id = self._ensure_session()
+        if session_id is None:
+            return None
         db.save_messages(
-            self._session_id, raw,
+            session_id, raw,
             jify_name="cli",
             model=getattr(self.config, "model", ""),
         )
         # 保存后清空，防止重复保存
         with self._session_messages_lock:
             self._session_messages.clear()
-        return self._session_id
+            self._dirty = False
+        return session_id
 
     def _persist_stream(self, role: str, content: str, tool_name: str = "") -> None:
         """旁路持久化：全量消息（含 tool 消息）实时落库到 stream 表。
@@ -585,16 +630,13 @@ class AgentLoop:
         """
         try:
             from storage.stream import get_stream_store
-            if self._session_id is None:
-                from storage.db import get_db
-                self._session_id = get_db().create_session(
-                    jify_name="cli",
-                    model=getattr(self.config, "model", ""),
-                )
+            session_id = self._ensure_session()
+            if session_id is None:
+                return None
             from storage.stream import set_current_session
-            set_current_session(self._session_id)
+            set_current_session(session_id)
             return get_stream_store().append(
-                self._session_id, role, content, tool_name)
+                session_id, role, content, tool_name)
         except Exception:
             logger.debug("stream persist failed", exc_info=True)
             return None
@@ -637,9 +679,10 @@ class AgentLoop:
             return
         self._turn_archived = True
         with self._session_messages_lock:
-            self._session_messages.extend(
-                [m for m in self.messages[self._turn_start_idx:] if m.role != "system"]
-            )
+            new_msgs = [m for m in self.messages[self._turn_start_idx:] if m.role != "system"]
+            if new_msgs:
+                self._session_messages.extend(new_msgs)
+                self._dirty = True
 
     def load_conversation(self, session_id: str) -> List[Message]:
         """从 SQLite 加载会话消息，返回 Message 列表并存入 _resume_messages。
@@ -662,7 +705,8 @@ class AgentLoop:
             messages.append(m)
 
         self._resume_messages = messages
-        self._session_id = session_id
+        with self._session_id_lock:
+            self._session_id = session_id
         return messages
 
     def _repair_dangling_tool_calls(self) -> None:

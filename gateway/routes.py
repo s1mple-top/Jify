@@ -1,5 +1,6 @@
 """FastAPI routes / WebSocket / 聊天处理 —— 从 gateway.py 提取。"""
 
+import asyncio
 import json
 import os
 import time
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 
 from agent_loop import AgentLoop, AgentConfig
 from jify_tool import registry
+from version_check import get_current_version
 
 from .auth import (
     _create_token,
@@ -148,7 +150,9 @@ def _require_user(token: str = Query("")) -> str:
 async def index():
     html_path = static_dir / "login.html"
     if html_path.exists():
-        return HTMLResponse(html_path.read_text(encoding="utf-8"))
+        # footer 版本号随 pyproject 走，避免硬编码过期
+        html = html_path.read_text(encoding="utf-8").replace("__VERSION__", get_current_version())
+        return HTMLResponse(html)
     return HTMLResponse("<h1>Jify Gateway</h1><p>gateway_web/login.html not found</p>")
 
 
@@ -404,20 +408,19 @@ async def api_delete_session(session_id: str, token: str = Query(...)):
         session = _sessions.get(session_id)
         if not session or session.user_id != user_id:
             raise HTTPException(status_code=404, detail="会话不存在")
-        # 删除前保存，避免丢消息
-        try:
-            session.agent.save_conversation()
-        except Exception:
-            pass
         del _sessions[session_id]
+    # 删除前保存，避免丢消息。先从字典摘除再在锁外写库：
+    # 锁内只做字典操作，写 SQLite 的耗时 IO 丢进线程池，不冻结事件循环
+    try:
+        await asyncio.to_thread(session.agent.save_conversation)
+    except Exception:
+        pass
     return {"ok": True}
 
 
 # WebSocket 端点
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    import asyncio
-
     token = ws.query_params.get("token", "")
     user_id = _validate_token(token)
     if not user_id:
@@ -555,17 +558,28 @@ async def websocket_endpoint(ws: WebSocket):
             drain_task.cancel()
         if run_task and not run_task.done():
             run_task.cancel()
-        # 断开时保存会话
+        # 断开时保存会话：写库丢进线程池，避免长会话序列化+全量重写冻结事件循环
+        session_id = None
         try:
-            session_id = agent.save_conversation()
-            if session_id:
+            session_id = await asyncio.to_thread(agent.save_conversation)
+        except asyncio.CancelledError:
+            # 服务关停/任务取消时线程池 await 无法完成，退回同步保存兜底一次，
+            # 代价是关停瞬间阻塞（此时已无并发请求），换取最后一轮不丢
+            try:
+                session_id = agent.save_conversation()
+            except Exception:
+                session_id = None
+        except Exception:
+            pass  # 静默忽略保存失败（ws 可能已断开）
+        if session_id:
+            try:
                 await ws.send_json({
                     "type": "session_saved",
                     "session_id": session_id,
                     "content": f"本次全程对话已保存，session_id: {session_id}",
                 })
-        except Exception:
-            pass  # 静默忽略保存失败（ws 可能已断开）
+            except Exception:
+                pass  # ws 已断开，通知发不出去属正常
 
 
 

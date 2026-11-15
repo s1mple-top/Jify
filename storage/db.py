@@ -140,6 +140,11 @@ class ConversationDB:
         批量保存消息列表。先删旧消息再全量写入（幂等）。
 
         messages 格式: [{"role", "content", "tool_calls"?, "tool_call_id"?, "reasoning_content"?}, ...]
+
+        注意：本方法内部先 DELETE 该 session 的全部消息再 INSERT，是**全量覆盖**语义。
+        调用方传入的必须是该会话的完整历史（当前活上下文），不能只传增量/本次新增，
+        否则之前已入库的轮次会被删掉。判断「是否需要写」属于调用方职责（见
+        AgentLoop.save_conversation 的 dirty 标记），不要用增量数据来驱动全量覆盖。
         """
         now = datetime.now().isoformat()
         with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
