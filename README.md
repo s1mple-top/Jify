@@ -2,11 +2,11 @@
 
 Jify Agent（Self-evolving harness Agent）是一款通用智能体，运行在您自己的设备上的个人 AI 助手。它可以帮你完成您需要的编程任务、安全排查（漏洞挖掘【黑白盒分析】）、代码分析、CTF、渗透测试。
 
-Jify 的核心侧重点在于“氛围编程”（vibecoding），安全功能则作为一项辅助能力——用户可在编码完成后进行本地安全检查，确保在部署前提前发现某些潜在风险。然而，在实际的安全性能评估中，Jify 展现出了极其强劲的能力；在 Tencent-tsecbench 测试中取得了 99.55 分（满分 100 分）的近乎完美的成绩，证明其完全有能力胜任日常的安全保障任务。
+Jify 的核心侧重点在于“氛围编程”（vibecoding），安全功能则作为一项辅助能力——用户可在编码完成后进行本地安全检查，确保在部署前提前发现某些潜在风险。然而，在实际的安全性能评估中，Jify 展现出了极其强劲的能力；在 Tencent-tsecbench V1 测试中取得了 99.55 分（满分 100 分）和 Tencent-tsecbench V2 测试中取得了 69.82 分（满分100分）【 中国 Top-4 】的近乎完美的成绩，证明其完全有能力胜任日常的安全保障任务。
 
 Jify Agent (Self-evolving harness Agent) is a general-purpose intelligent agent — a personal AI assistant that runs on your own device. It helps you with programming tasks, security audits (vulnerability discovery via black-box/white-box analysis), code analysis, CTF challenges, and penetration testing. 
 
-Jify’s primary focus is on "vibecoding," with security features serving as a supplementary capability—users can perform local security checks after coding to identify potential risks before deployment. In actual security performance evaluations, however, Jify has demonstrated exceptional strength; it achieved a near-perfect score of 99.55 out of 100 in the Tencent-tsecbench benchmark, proving that it is fully capable of handling routine security assurance tasks.
+Jify’s primary focus is on "vibecoding," with security features serving as a supplementary capability—users can perform local security checks after coding to identify potential risks before deployment. In actual security performance evaluations, however, Jify has demonstrated exceptional strength: it achieved a near-perfect score of 99.55 out of 100 in the Tencent-tsecbench V1 benchmark, and a score of 69.82 out of 100 in Tencent-tsecbench V2—ranking among the top 4 in China—which proves it is fully capable of handling routine security assurance tasks.
 
 
 
@@ -51,11 +51,20 @@ https://github.com/user-attachments/assets/68095fbc-9af2-4019-b8d9-512a754b2d6d
 | CVE-2026-121583   | PublicCMS 5    | `TradePaymentService.pendingRefund` 对 `userId` 未做归属校验，可越权访问他人支付退款数据（CWE-639），由 Jify 发掘并验证 / Missing ownership check on `userId` in `TradePaymentService.pendingRefund` allows access to other users' payment refund data (CWE-639), discovered and validated by Jify |
 | CVE-2026-125082   | sunkaifei FlyCms | XSS 替代语法未正确中和，可绕过过滤注入脚本（CWE-79/CWE-87），由 Jify 发掘并验证 / Improper neutralization of alternate XSS syntax allows bypassing filters to inject script (CWE-79/CWE-87), discovered and validated by Jify |
 
-## Tsecbench AK ALL
+## Tsecbench V1 AK ALL
 
 <img width="3088" height="440" alt="image" src="https://github.com/user-attachments/assets/dfb53246-fdde-4212-8d11-dd97b08f7964" />
 
 <img width="2856" height="980" alt="image" src="https://github.com/user-attachments/assets/187ccd9d-1831-4f1c-b53a-1cea32750ab1" />
+
+## Tsecbench V2 Top4 in China（Achieve excellent results with minimal token consumption in large models.）
+
+<img width="1410" height="467" alt="image" src="https://github.com/user-attachments/assets/1d984815-652b-4f91-a19a-34b063031015" />
+
+<img width="2640" height="912" alt="image" src="https://github.com/user-attachments/assets/9ad9c126-7f89-41c9-a124-2575c4c0f38a" />
+
+<img width="2546" height="1360" alt="image" src="https://github.com/user-attachments/assets/e61b590b-b2b5-4713-ae90-cee995c6d230" />
+
 
 ## 安装 / Installation
 
