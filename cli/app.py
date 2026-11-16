@@ -230,8 +230,8 @@ class JifyCLI:
         # 加载配置
         self.config = AgentConfig.load_from_yaml()
 
-        # 加载内置工具（触发 tools.builtin 的 @register_tool）
-        from jify_tool import registry as reg
+        # 加载内置工具（import jify_tool 的执行副作用触发 tools.builtin 的 @register_tool）
+        import jify_tool  # noqa: F401
 
         # 插件系统-加载插件
         try:
@@ -251,9 +251,8 @@ class JifyCLI:
         except Exception:
             self._mcp_manager = None
 
-        # 构建 tools schema（在所有工具注册完毕后统一收集，确保插件工具也被纳入）
-        # MCP 工具异步加载后会通过 _rebuild_tools() 追加
-        self._build_tools(reg)
+        # 工具 schema 由 tools property 从 registry 实时构建（含插件工具与
+        # 异步加载的 MCP 工具），此处无需预先收集快照。
 
         # 自进化引擎（后台线程，不阻塞主对话）
         self.evolution = SelfEvolutionEngine(
@@ -417,6 +416,9 @@ class JifyCLI:
                         model=model,
                         temperature=0.3,
                         max_tokens=1024,
+                        # 一次性摘要：prompt 每次唯一、永不命中缓存，
+                        # 打 cache_control 只会多付写入费
+                        disable_prompt_cache=True,
                     )
                     return response.content
 
@@ -437,6 +439,9 @@ class JifyCLI:
                 model=model,
                 temperature=0.3,
                 max_tokens=1024,
+                # 一次性摘要：prompt 每次唯一、永不命中缓存，
+                # 打 cache_control 只会多付写入费
+                disable_prompt_cache=True,
             )
             return response.content
 
@@ -566,53 +571,31 @@ class JifyCLI:
         except Exception:
             pass
 
-    def _build_tools(self, reg) -> None:
-        """从 registry 重建工具 schema 列表，线程安全。"""
-        tools = []
-        for name in reg.get_all_names():
-            tool = reg.get(name)
-            if tool:
-                tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                    },
-                })
+    @property
+    def tools(self) -> list:
+        """从 registry 实时构建工具 schema 列表。
 
-        self.tools = tools
+        不缓存快照：mcp_reload 会注销并重新注册 MCP 工具，沿用启动时的
+        快照会让新工具在 registry 里可 dispatch、mcp_list 也列得出，但模型
+        拿到的 schema 里没有它，从而永远不会主动调用。
+        """
+        from tools.registry import build_tool_schemas
+
+        return build_tool_schemas()
 
     def start_mcp_async(self) -> None:
         """后台线程连接 MCP server，不阻塞主线程。
 
-        MCP 连接成功并注册工具后，自动更新 self.tools。
+        MCP 工具注册进 registry 后即对模型可见：tools 是 property，
+        每次构造请求时都从 registry 实时读取，无需在此刷新快照。
         """
         if self._mcp_loaded or self._mcp_manager is None:
             return
         self._mcp_loaded = True
 
-        import logging
-        _log = logging.getLogger(__name__)
-        mgr = self._mcp_manager
-
-        def _connect():
-            try:
-                connect_results = mgr.connect_all()
-                discover_results = mgr.discover_and_register()
-                total = sum(max(0, v) for v in discover_results.values())
-                if total > 0:
-                    _log.info(
-                        "MCP: %d tools from %d server(s)",
-                        total, len(discover_results),
-                    )
-                    from jify_tool import registry as reg
-                    self._build_tools(reg)
-            except Exception as e:
-                _log.warning("MCP async init failed: %s", e)
-
-        t = threading.Thread(target=_connect, daemon=True, name="mcp-loader")
-        t.start()
+        # 连接与工具发现的具体实现在 MCPManager.load_async()，gateway 启动路径
+        # 复用同一份实现，避免两处各写一套后台线程逻辑。
+        self._mcp_manager.load_async()
 
     @staticmethod
     def _get_skills() -> list:

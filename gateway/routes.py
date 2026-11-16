@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from agent_loop import AgentLoop, AgentConfig
 from jify_tool import registry
+from tools.registry import build_tool_schemas
 from version_check import get_current_version
 
 from .auth import (
@@ -61,6 +62,17 @@ try:
     _plugin_loader.load_all(enabled_only=_gw_config.enabled_plugins)
 except Exception:
     _plugin_loader = None
+
+# MCP 加载（后台线程：逐个 server 建连可能耗时数十秒，不能阻塞 uvicorn 启动）。
+# 工具注册进 registry 后即可用，因为工具 schema 在每条 chat 消息处理时实时构建，
+# 加载完成前已建立的 WebSocket 连接也能看到新工具。
+try:
+    from tools.mcp.manager import mcp_manager
+
+    if mcp_manager.load_servers() > 0:
+        mcp_manager.load_async()
+except Exception:
+    pass
 
 # 会话管理
 
@@ -445,18 +457,9 @@ async def websocket_endpoint(ws: WebSocket):
 
     system_prompt = _build_system_prompt()
 
-    tool_schemas = []
-    for name in registry.get_all_names():
-        tool = registry.get(name)
-        if tool:
-            tool_schemas.append({
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.parameters,
-                },
-            })
+    # 工具 schema 不在此处定快照：MCP 工具是后台线程加载的，可能在连接建立
+    # 之后才注册完成。改为每处理一条 chat 消息时用 build_tool_schemas() 实时
+    # 构建，使已建立的连接也能拿到新工具。
 
     # 多会话下每个会话保留独立历史，连接时不再 clear_history；
     # 仅清空上一会话残留的 event_bus 事件（todo/diff/message 等），避免跨会话泄漏
@@ -499,7 +502,12 @@ async def websocket_endpoint(ws: WebSocket):
                 from tools.approval import clear_break
                 clear_break()
 
-                async def _run(_msg=user_message):
+                # 每条 chat 消息实时取一次工具集：MCP 工具若在连接建立后才加载
+                # 完成，本轮即可用上，无需用户重连。单轮内 agent.run 用同一份
+                # 传入的列表，工具不会中途变化。
+                tool_schemas = build_tool_schemas()
+
+                async def _run(_msg=user_message, _schemas=tool_schemas):
                     nonlocal run_task
                     try:
                         result = await asyncio.to_thread(
@@ -508,7 +516,7 @@ async def websocket_endpoint(ws: WebSocket):
                             user_message=_msg,
                             system_prompt=system_prompt,
                             console=console,
-                            tool_schemas=tool_schemas,
+                            tool_schemas=_schemas,
                         )
                         await console.drain_outgoing()
                         await ws.send_json({
@@ -589,7 +597,6 @@ def _build_system_prompt() -> str:
     from config.system_prompt import SystemPromptBuilder
     builder = SystemPromptBuilder()
     return builder.build()
-
 
 
 # 启动入口

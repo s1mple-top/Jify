@@ -234,6 +234,28 @@ class ToolRegistry:
 registry = ToolRegistry()
 
 
+def build_tool_schemas() -> List[Dict[str, Any]]:
+    """从 registry 实时构建 OpenAI function 调用格式的 tool schemas。
+
+    刻意不缓存：mcp_reload 会注销并重新注册 MCP 工具，若沿用启动时的快照，
+    新工具在 registry 里可 dispatch、mcp_list 也列得出，但模型拿到的 schema
+    里没有它，从而永远不会被主动调用。CLI 与 gateway 共用本函数。
+    """
+    schemas = []
+    for name in registry.get_all_names():
+        tool = registry.get(name)
+        if tool:
+            schemas.append({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                },
+            })
+    return schemas
+
+
 
 def register_tool(name: str, description: str = "", parameters: Optional[Dict] = None,
                   parallel_safe: bool = False, requires_approval: bool = False,

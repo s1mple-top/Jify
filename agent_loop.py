@@ -1541,6 +1541,9 @@ class AgentLoop:
                     tool_schemas=[],
                     model=self.config.summary_model or self.config.model,
                     stream=False,
+                    # 摘要 prompt 每次唯一、永不命中缓存，打 cache_control 只会
+                    # 让 Anthropic 官方按 1.25x 收取缓存写入费，故跳过断点注入
+                    disable_prompt_cache=True,
                     # 摘要有规则兜底 + 熔断，超时按配置（默认 2 × 90s）：
                     # 原先 3 × 240s 意味着单次失败最多占用 12 分钟主线程，
                     # 用户侧表现为彻底卡死

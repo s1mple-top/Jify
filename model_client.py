@@ -805,11 +805,9 @@ class AnthropicClient:
             "max_tokens": max_tokens,
         }
         if system_parts:
-            # 单段且无 cache_control 时用字符串，其余用 block 数组
-            if len(system_parts) == 1 and "cache_control" not in system_parts[0]:
-                create_kwargs["system"] = system_parts[0]["text"]
-            else:
-                create_kwargs["system"] = system_parts
+            # 始终用 block 数组：字符串形态挂不上 cache_control，会让 prompt cache 失效。
+            # 单段时也走数组，Anthropic 对两种形态等价接受。
+            create_kwargs["system"] = system_parts
         if tool_schemas:
             create_kwargs["tools"] = _openai_tools_to_anthropic(tool_schemas)
 
@@ -833,6 +831,22 @@ class AnthropicClient:
         is_stream = kwargs.get("stream", False)
         if is_stream:
             create_kwargs["stream"] = True
+
+        # 注入 prompt cache 断点（system 末尾 + 最后一条消息末尾）。
+        # 必须在所有消息/系统/工具字段定型之后、发请求之前执行。
+        #
+        # 一次性辅助调用（摘要压缩等）应传 disable_prompt_cache=True 跳过：
+        # 这类请求的 prompt 每次唯一、永远不命中，而 Anthropic 官方缓存写入
+        # 约 1.25x 单价，打点等于白付 25% 的 input 费用。
+        _skip_cache = kwargs.pop("disable_prompt_cache", False)
+        if not _skip_cache and prompt_cache_enabled():
+            try:
+                injected = _apply_anthropic_cache_control(create_kwargs)
+                if injected:
+                    logger.debug("anthropic prompt cache breakpoints: %d", injected)
+            except Exception:
+                # 打点是纯优化，任何异常都不能阻断主请求
+                logger.debug("apply cache_control failed", exc_info=True)
 
         # 透传剩余 extra_body（如 DeepSeek 的 output_config 等扩展参数）。
         # 必须通过 SDK 的 extra_body 参数传给请求体，不能展开成顶层 kwarg，
@@ -974,6 +988,119 @@ def _openai_tools_to_anthropic(tool_schemas: List[Dict]) -> List[Dict]:
         }
         result.append(anthro)
     return result
+
+
+# prompt cache 断点
+# Anthropic 的 prompt cache 是显式 opt-in：请求里不标 cache_control 就不缓存，
+# 每轮把 system prompt + tools + 全部历史按原价重算。Jify 的固定前缀
+# （system ~6K 字符 + 21 个工具 schema ~12K 字符）远超最小可缓存长度，
+# 不打点等于持续付费却拿不到任何折扣。
+#
+# 断点布局（共 2 个，留 2 个余量）：
+#   1) system 最后一个 block —— tools 排在其前缀里，一并被覆盖，故 tools 不打点
+#   2) 最后一条消息的最后一个 block —— 覆盖到当前轮，下一轮转为历史即命中
+# thinking / redacted_thinking 块上不能打点：
+# 带签名的思考块要原样回传，附挂字段会让校验失败。
+#
+# 官方 api.anthropic.com 必须打点才生效。走中转（deepseek / ark / qianwen 等）
+# 时这些标记要么被服务端用来决定缓存边界、要么作为未知字段丢弃，实测均不报错。
+_MAX_CACHE_BREAKPOINTS = 4
+_CACHE_UNSTAMPABLE_TYPES = ("thinking", "redacted_thinking")
+
+
+def prompt_cache_enabled() -> bool:
+    """prompt cache 断点注入开关，默认开启。
+
+    环境变量 JIFY_DISABLE_PROMPT_CACHE=1 可关闭，用于个别中转对
+    cache_control 字段处理异常时的兜底。
+    """
+    return os.getenv("JIFY_DISABLE_PROMPT_CACHE", "").strip().lower() not in (
+        "1", "true", "yes", "on"
+    )
+
+
+def _cache_ttl() -> Optional[str]:
+    """缓存存活时间。默认不显式指定（服务端 5m）；设 1h 可覆盖长任务间隙。"""
+    ttl = os.getenv("JIFY_PROMPT_CACHE_TTL", "").strip().lower()
+    return ttl if ttl in ("5m", "1h") else None
+
+
+def _cache_marker(ttl: Optional[str]) -> Dict[str, str]:
+    marker: Dict[str, str] = {"type": "ephemeral"}
+    if ttl:
+        marker["ttl"] = ttl
+    return marker
+
+
+def _apply_anthropic_cache_control(create_kwargs: Dict) -> int:
+    """给 Messages API 请求注入 prompt cache 断点，返回实际注入数量（原地修改**
+
+    create_kwargs **，但不触碰调用方传入的 block 对象**）。
+
+    只打 2 个断点：system 末尾 + 最后一条消息末尾。tools 不打点，因为
+    Anthropic 的缓存前缀按 tools → system → messages 顺序累积，system 上的
+    断点天然把 tools 一起覆盖。
+
+    无副作用很重要：`_sanitize_anthropic_message` 处理 block 数组时保留的是
+    原始 dict 引用（`[b for b in content if ...]`），若原地修改最后一个 block，
+    会把 cache_control 写回调用方的 message 对象，进而污染 agent 的历史消息
+    （被压缩摘要化、序列化进数据库）。因此这里一律「复制列表 + 复制目标 block」
+    后再打点。
+    """
+    marker = _cache_marker(_cache_ttl())
+    # 全程只读一份 ttl 决定，避免中途变化导致同一次请求出现混合 TTL
+    injected = 0
+
+    # 1) system 末尾
+    system = create_kwargs.get("system")
+    if isinstance(system, str):
+        if system.strip():
+            system = [{"type": "text", "text": system}]
+            create_kwargs["system"] = system
+        else:
+            system = None
+    if isinstance(system, list) and system:
+        last = system[-1]
+        if isinstance(last, dict) and isinstance(last.get("text"), str) and last["text"].strip():
+            new_system = list(system)
+            new_system[-1] = {**last, "cache_control": dict(marker)}
+            create_kwargs["system"] = new_system
+            injected += 1
+
+    # 2) 最后一条消息（从后往前找第一个可打点的块）
+    if injected < _MAX_CACHE_BREAKPOINTS:
+        messages = create_kwargs.get("messages")
+        if isinstance(messages, list) and messages:
+            for idx in range(len(messages) - 1, -1, -1):
+                msg = messages[idx]
+                if not isinstance(msg, dict):
+                    continue
+                content = msg.get("content")
+                if isinstance(content, str):
+                    if not content.strip():
+                        continue
+                    content = [{"type": "text", "text": content}]
+                if not isinstance(content, list) or not content:
+                    continue
+                last = content[-1]
+                if not isinstance(last, dict):
+                    continue
+                if last.get("type") in _CACHE_UNSTAMPABLE_TYPES:
+                    continue
+                # 空文本块打点会被 API 以 "text content blocks must be non-empty" 拒绝
+                if last.get("type") == "text" and not (last.get("text") or "").strip():
+                    continue
+                new_content = list(content)
+                new_content[-1] = {**last, "cache_control": dict(marker)}
+                new_msg = dict(msg)
+                new_msg["content"] = new_content
+                new_messages = list(messages)
+                new_messages[idx] = new_msg
+                create_kwargs["messages"] = new_messages
+                injected += 1
+                break
+
+    return injected
 
 
 def _thinking_blocks_to_anthropic(msg: Dict) -> List[Dict]:

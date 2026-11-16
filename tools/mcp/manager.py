@@ -17,7 +17,7 @@ import os
 import subprocess
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from tools.registry import registry
 from tools.mcp.config import load_config, MCPServerConfig
@@ -325,6 +325,41 @@ class MCPManager:
                 logger.warning(f"Failed to discover tools for '{name}': {e}")
 
         return results
+
+    def load_async(
+        self,
+        on_loaded: Optional[Callable[[int], None]] = None,
+    ) -> threading.Thread:
+        """后台线程连接所有 server 并发现工具，不阻塞调用方。
+
+        connect_all() 逐个 server 建连（含 initialize 握手），配置多个 server
+        时串行耗时可达数十秒。CLI 与 gateway 都在启动路径上调用本方法，
+        避免阻塞主线程 / 事件循环。
+
+        Args:
+            on_loaded: 加载完成后的回调，参数为本次注册的工具总数。
+
+        Returns:
+            已启动的后台线程（daemon）。
+        """
+
+        def _run() -> None:
+            try:
+                self.connect_all()
+                discover_results = self.discover_and_register()
+                total = sum(max(0, v) for v in discover_results.values())
+                logger.info(
+                    "MCP: %d tools from %d server(s)",
+                    total, len(discover_results),
+                )
+                if on_loaded is not None:
+                    on_loaded(total)
+            except Exception:
+                logger.warning("MCP async load failed", exc_info=True)
+
+        thread = threading.Thread(target=_run, daemon=True, name="mcp-loader")
+        thread.start()
+        return thread
 
 
     # 运行时工具调用（含自动重连）

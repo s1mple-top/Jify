@@ -94,6 +94,22 @@ def _cell_est_lines(cell: str, budget: int) -> float:
     return (n_chars * 2 if width != n_chars else width) / max(1, budget)
 
 
+def _max_unbreakable_width(cells) -> int:
+    """一组单元格里最长「不可断片段」的显示宽度。
+
+    中文与全角标点可逐字折行，视觉上不会破坏语义；而英文标识符、路径、模型名
+    这类连续半角串被 fold 拦腰切断（context_manager -> context_mana / ger）后
+    基本不可读。因此只统计连续半角串的长度，宽字符按断点处理。
+    """
+    best = 0
+    for cell in cells:
+        for token in str(cell).split():
+            # 按非 ASCII 段切开：中文/全角标点天然是断点
+            for seg in re.split(r"[^\x00-\x7f]+", token):
+                best = max(best, len(seg))
+    return best
+
+
 # 全局终端模式锁：保护所有 tcgetattr/tcsetattr 操作。
 # 审批流程(approval)与 prompt_toolkit、动画线程都可能切换终端模式，
 # 统一用这把锁串行化，防止并发切换导致 termios 状态错乱（输入失效）。
@@ -1073,19 +1089,35 @@ class OutputEngine:
         n_cols = max(1, len(header_cells))
         nat = self._natural_col_widths(header_cells, data_rows, n_cols)
         caps = self._compute_col_caps(nat, n_cols)
-        # 兜底降级：三选一即降级为键值列表，可读性都优于碎行表格
+        # 兜底降级：四选一即降级为键值列表，可读性都优于碎行表格
         #   1) 折行爆炸（单格要撕 8 行以上）
-        #   2) 终端太窄（每列不足 10 显示列 ≈ 5 个汉字）
-        #   3) 内容超出可用宽度且最窄列已被压到 10 显示列以下
-        avail = self._console.width - 3 * n_cols
-        compressed = sum(nat) > avail and min(caps) < 10
+        #   2) 终端太窄（均分到每列不足 10 显示列 ≈ 5 个汉字）
+        #   3) 内容超出可用宽度且【被压缩的列】里存在压到 10 显示列以下的。
+        #      只统计确实发生压缩的列：短列表头（如「是否」「做吗」）自然宽本就
+        #      不足 10，从未被压缩却被 min(caps) 计入，会让「短表头 + 一个长内容列」
+        #      的正常表格被误降级成键值列表，可读性反而更差。
+        #   4) 硬切：某列被压缩后放不下该列最长的不可断片段（英文标识符/路径/
+        #      模型名）。这类串被 fold 拦腰切断后基本不可读，此时降级反而能完整显示。
+        #   5) 两列表格本质是键值对：内容一旦需要折行，表格边框只剩开销（每列白吃
+        #      3 列 padding+分隔符），降级成「键: 值」反而能多出可用宽度。内容都放
+        #      得下时不降级，形如 |参数|值| 的小表仍然好看。
+        compressed = any(nat[j] > caps[j] and caps[j] < 10 for j in range(n_cols))
         narrow = self._console.width // n_cols - 2 < 10
+        hard_cut = any(
+            nat[j] > caps[j]
+            and caps[j] < _max_unbreakable_width(
+                [row[j] for row in data_rows if j < len(row)]
+            )
+            for j in range(n_cols)
+        )
+        kv_pair = n_cols == 2 and any(nat[j] > caps[j] for j in range(n_cols))
         est_lines_per_cell = max(
             (_cell_est_lines(c, caps[j]) for row in data_rows
              for j, c in enumerate(row[:n_cols])),
             default=0,
         )
-        if n_cols >= 2 and (est_lines_per_cell > 8 or narrow or compressed):
+        if n_cols >= 2 and (est_lines_per_cell > 8 or narrow
+                            or compressed or hard_cut or kv_pair):
             fallback: list[Text] = []
             for row in data_rows:
                 line = Text()

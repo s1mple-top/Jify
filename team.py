@@ -490,6 +490,9 @@ class TeamWorker:
                 tool_schemas=[],
                 model=self.config.model,
                 stream=False,
+                # 一次性压缩：prompt 每次唯一、永不命中缓存，
+                # 打 cache_control 只会多付写入费
+                disable_prompt_cache=True,
             )
             summary = (resp.content or "").strip()
         except Exception:
