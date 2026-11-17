@@ -98,11 +98,22 @@ class ConversationDB:
         }
 
     def list_sessions(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """列出最近会话"""
+        """列出最近会话
+
+        附带该会话「首条 / 末条用户输入」（first_user_message / last_user_message），
+        供 /sessions 展示，便于用户凭印象回忆是哪次对话：首条定题，末条是收尾指令。
+        SQL 侧只取前 200 字符，避免大段粘贴撑爆列表。
+        """
         with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
             rows = conn.execute(
-                "SELECT id, created_at, ended_at, jify_name, model, message_count "
-                "FROM sessions ORDER BY created_at DESC LIMIT ?",
+                "SELECT s.id, s.created_at, s.ended_at, s.jify_name, s.model, s.message_count, "
+                "  (SELECT substr(m.content, 1, 200) FROM messages m "
+                "   WHERE m.session_id = s.id AND m.role = 'user' "
+                "   ORDER BY m.seq ASC LIMIT 1) AS first_user_message, "
+                "  (SELECT substr(m.content, 1, 200) FROM messages m "
+                "   WHERE m.session_id = s.id AND m.role = 'user' "
+                "   ORDER BY m.seq DESC LIMIT 1) AS last_user_message "
+                "FROM sessions s ORDER BY s.created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [
@@ -113,6 +124,8 @@ class ConversationDB:
                 "jify_name": r[3],
                 "model": r[4],
                 "message_count": r[5],
+                "first_user_message": r[6] or "",
+                "last_user_message": r[7] or "",
             }
             for r in rows
         ]

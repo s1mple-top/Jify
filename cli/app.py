@@ -856,6 +856,13 @@ def _fit(content: str, width: int) -> str:
     return "".join(out) + suffix
 
 
+def _short_time(ts: str) -> str:
+    """ISO 时间戳压成 'YYYY-MM-DD HH:MM'，格式不符则原样返回。"""
+    if isinstance(ts, str) and "T" in ts and len(ts) >= 16:
+        return f"{ts[:10]} {ts[11:16]}"
+    return ts
+
+
 def _show_trust_prompt(cwd: str) -> bool:
     """启动 banner 前的风险提示：上下键选择，回车确认。
 
@@ -1291,10 +1298,22 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False,
                             meta(f"  最近 {len(sessions)} 个会话:")
                             for s in sessions:
                                 sid = s.get("id", "?")
-                                created = s.get("created_at", "?")
+                                created = _short_time(s.get("created_at", "?"))
                                 model = s.get("model", "?")
                                 count = s.get("message_count", 0)
                                 meta(f"    {sid}  {created}  {model}  ({count} 条消息)")
+                                # 预览：首条定题 → 末条收尾。压成单行后按显示宽度截断。
+                                first = " ".join(
+                                    (s.get("first_user_message") or "").split())
+                                last = " ".join(
+                                    (s.get("last_user_message") or "").split())
+                                if not first and not last:
+                                    meta("        (无用户输入)")
+                                elif first == last:
+                                    meta(f"        {_fit(first, 68)}")
+                                else:
+                                    meta(f"        {_fit(first, 44)} → "
+                                         f"{_fit(last, 24)}")
                     except Exception as e:
                         meta(f"  ⚠ 加载失败: {e}")
                     divider()

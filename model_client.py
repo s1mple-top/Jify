@@ -108,7 +108,7 @@ class _RetryableStreamMixin:
         # max_attempts=3 => 2 次重连，退避 2s / 4s；叠加 3 次 10s 读超时后
         # 累计约 36s，与 _retry 的 backoff_base=3.0 同量级。
         wait = 2.0 ** (self._attempt - 1) + random.uniform(0, 1)
-        logger.warning(
+        logger.debug(
             "stream interrupted before any output (%s), reconnecting %d/%d in %.1fs",
             type(exc).__name__, self._attempt, self._max_attempts, wait,
         )
@@ -146,6 +146,29 @@ class OpenAIStreamAdapter(_RetryableStreamMixin):
                     raise
 
     def _iter_once(self):
+        # 部分网关的并行 tool_call delta 不带 index（或 index 恒为 0）。原先一律折叠到 0，
+        # 会把多个调用的 arguments 拼进同一槽位（后者被前者的半截 JSON 污染），
+        # 甚至覆盖 name。这里按「出现新 id / 新 name」分配递增槽位：
+        #   - delta 完全没有 index  -> 用自增计数
+        #   - index 退化为常量（同槽位又出现新调用）-> 同样视为该网关不用 index，继续自增
+        # 两条都只是「重新分配」，不抛错：这类网关原本能产出结果（虽然错乱），
+        # 抛错会把它变成整轮失败，是更差的结局。
+        slot_ids: Dict[int, str] = {}
+        slot_names: Dict[int, str] = {}
+        # 原 index -> 实际槽位。网关把 index 退化成常量时，同一 index 会接连承载
+        # 多个调用；一旦重映射，该 index 的后续 arguments delta 也必须跟着走。
+        remap: Dict[int, int] = {}
+        auto_index = 0
+
+        def _starts_new_call(idx: int, tc_id: str, tc_name: str) -> bool:
+            prev_id = slot_ids.get(idx, "")
+            prev_name = slot_names.get(idx, "")
+            return bool((tc_id and prev_id and tc_id != prev_id) or
+                        (tc_name and prev_name and tc_name != prev_name))
+
+        def _next_slot() -> int:
+            return max(auto_index, max(slot_ids, default=-1) + 1)
+
         for chunk in self._stream:
             sc = StreamChunk()
 
@@ -167,15 +190,32 @@ class OpenAIStreamAdapter(_RetryableStreamMixin):
 
             if hasattr(delta, "tool_calls") and delta.tool_calls:
                 for tc in delta.tool_calls:
-                    tcd = ToolCallDelta(
-                        index=tc.index if hasattr(tc, "index") else 0,
-                        id=tc.id if hasattr(tc, "id") and tc.id else "",
-                    )
-                    if hasattr(tc, "function") and tc.function:
-                        if hasattr(tc.function, "name") and tc.function.name:
-                            tcd.name = tc.function.name
-                        if hasattr(tc.function, "arguments") and tc.function.arguments:
-                            tcd.arguments = tc.function.arguments
+                    tc_id = getattr(tc, "id", "") or ""
+                    fn = getattr(tc, "function", None)
+                    tc_name = (getattr(fn, "name", "") or "") if fn else ""
+
+                    raw_idx = getattr(tc, "index", None)
+                    if raw_idx is None:
+                        if _starts_new_call(auto_index, tc_id, tc_name):
+                            auto_index += 1
+                        idx = auto_index
+                    else:
+                        idx = remap.get(raw_idx, raw_idx)
+                        if _starts_new_call(idx, tc_id, tc_name):
+                            # index 不可信的网关：按到达顺序续接新槽位，
+                            # 并记住该原 index 之后都指向新槽位
+                            auto_index = _next_slot()
+                            remap[raw_idx] = idx = auto_index
+
+                    if tc_id:
+                        slot_ids[idx] = tc_id
+                    if tc_name:
+                        slot_names[idx] = tc_name
+
+                    tcd = ToolCallDelta(index=idx, id=tc_id)
+                    if fn is not None:
+                        tcd.name = tc_name
+                        tcd.arguments = getattr(fn, "arguments", "") or ""
                     sc.tool_call_deltas.append(tcd)
 
             if hasattr(chunk.choices[0], "finish_reason") and chunk.choices[0].finish_reason:
@@ -335,9 +375,9 @@ def _parse_stream_error_event(event) -> AnthropicStreamError:
     )
 
 
-def _make_cache_key(provider: str, api_key: str, base_url: str) -> str:
-    """生成缓存 key"""
-    return f"{provider}::{api_key}::{base_url}"
+# def _make_cache_key(provider: str, api_key: str, base_url: str) -> str:
+#     """生成缓存 key"""
+#     return f"{provider}::{api_key}::{base_url}"
 
 
 _RETRYABLE_PATTERNS = (

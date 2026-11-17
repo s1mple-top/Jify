@@ -10,7 +10,7 @@ from tools.registry import registry, _subagent_whitelist
 from tools.call_context import is_cancelled
 from context_shed import persist_large_result, shed_tool_outputs
 
-# 线程级 subagent 统计：由 SubagentRunner.run() 写入，CLI _fire_tool 读取
+# 线程级 subagent 统计：由 SubagentRunner.run() 写入，工具侧 _print_done 读取
 _subagent_stats: Dict[int, Dict] = {}
 
 _CANCELLED_RESULT = "[subagent] 任务已被取消，未执行完。"
@@ -19,9 +19,9 @@ _CANCELLED_RESULT = "[subagent] 任务已被取消，未执行完。"
 def reset_subagent_stats() -> None:
     """清空全部 subagent 统计残留。
 
-    正常路径由 CLI 的 _exec_subagent 在跑完后 pop 掉自己那条；但被中断 /
-    走非预执行路径的调用没人消费，会在线程 ident 维度留下死记录。
-    轮次边界（持有 agent_lock，无并发 subagent）调用本函数统一收敛。
+    通常由 _print_done 在跑完后 pop 掉自己那条；被中断的调用没有走到那里，
+    会在线程 ident 维度留下死记录。轮次边界（持有 agent_lock，无并发 subagent）
+    调用本函数统一收敛。
     """
     _subagent_stats.clear()
 
@@ -202,10 +202,14 @@ class SubagentRunner:
                     _record_stats()
                     return content
 
+                # 上行前把非法 arguments 换成 "{}"：被拒绝执行的调用（见下方 parse_err）
+                # 若带着半截串留在历史里，之后每轮请求都会被校验 arguments 的网关 400
+                # 拒掉。tool_calls 原对象不动，下面的执行判定仍按原始串拒绝。
+                from agent_loop import _sanitize_tool_calls_for_transport
                 assistant_msg = {
                     "role": "assistant",
                     "content": content,
-                    "tool_calls": tool_calls,
+                    "tool_calls": _sanitize_tool_calls_for_transport(tool_calls),
                 }
                 messages.append(assistant_msg)
                 # assistant 正文在下一轮会发送给模型，按原始字符数计入 sent（与主 Agent 一致）
@@ -220,13 +224,18 @@ class SubagentRunner:
                     tool_name = tc["function"]["name"]
                     try:
                         tool_args = json.loads(tc["function"]["arguments"])
-                    except (json.JSONDecodeError, TypeError):
+                        parse_err = ""
+                    except (json.JSONDecodeError, TypeError) as e:
                         tool_args = {}
+                        parse_err = str(e)
 
                     tool_uses += 1
                     if on_progress:
                         on_progress("tool_start", {"name": tool_name, "args": tool_args})
-                    result = registry.dispatch(tool_name, tool_args)
+                    # 参数非法不降级成 {} 执行（等于空参调用有副作用工具），回错误让模型重发
+                    result = (json.dumps({"error": f"工具参数不是合法 JSON，已拒绝执行: {parse_err}"},
+                                         ensure_ascii=False)
+                              if parse_err else registry.dispatch(tool_name, tool_args))
                     if on_progress:
                         on_progress("tool_end", {"name": tool_name, "result": result[:200]})
                     # 级 0 摄入闸门：单条超限即落盘，上下文只留 preview，

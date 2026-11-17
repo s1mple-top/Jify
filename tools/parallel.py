@@ -15,6 +15,11 @@ _PARALLEL_SAFE = frozenset({
 # 按路径隔离的工具（不同路径可并行）
 _PATH_SCOPED = frozenset({"read_file", "write_file", "patch_file"})
 
+# 允许流式预执行（arguments 还没收全就提前 fire）的工具。只读工具重复执行无副作用，
+# 有副作用工具必须等参数完整后再执行：交错流下提前 fire 会拿半截 JSON 执行，
+# 且最终签名与完整参数对不上，还会被 _execute_tools 再执行一遍。
+FIRE_SAFE_TOOLS = _PARALLEL_SAFE
+
 _MAX_WORKERS = 8
 
 

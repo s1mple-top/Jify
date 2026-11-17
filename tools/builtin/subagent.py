@@ -6,6 +6,10 @@ from subagent import SubagentRunner
 
 import itertools
 import os, sys as _sys
+import threading
+import time
+
+from rich.text import Text
 
 # 状态栏展示用的 subagent 自增编号（itertools.count 的 next 在多线程下安全）
 _SA_SEQ = itertools.count(1)
@@ -38,6 +42,35 @@ def _build_whitelist_schemas() -> list:
                 },
             })
     return schemas
+
+
+def _print_done(tool_uses: int, start_time: float) -> None:
+    """subagent 结束后在 CLI 打一行汇总（tool uses / 耗时 / token）。
+
+    整轮结束后在 CLI 打一行汇总（tool uses / 耗时 / token），由本工具直接渲染：
+    subagent_run 有副作用，不参与流式预执行，那条路径上的收尾钩子不会被执行。
+    gateway 模式没有 OutputEngine，get_output_engine() 返回 None，这行只在 CLI 出现。
+    """
+    from team import get_output_engine
+    from output_engine import OutputEngine, JifyTheme
+    from subagent import _subagent_stats
+
+    engine = get_output_engine()
+    if not engine:
+        return
+
+    stats = _subagent_stats.pop(threading.get_ident(), {}) or {}
+    sent_est = stats.get("sent_est", 0)
+    recv_est = stats.get("recv_est", 0)
+    token_str = ""
+    if sent_est:
+        token_str += f" · ↑ {OutputEngine.fmt_tokens(sent_est // 2)} tokens"
+    if recv_est:
+        token_str += f" · ↓ {OutputEngine.fmt_tokens(recv_est // 2)} tokens"
+    engine.queue_output(Text(
+        f"  ⏻  Done ({tool_uses} tool uses · {OutputEngine.fmt_elapsed(time.time() - start_time)}{token_str})",
+        style=JifyTheme.SUBTLE
+    ))
 
 
 @register_tool(
@@ -103,7 +136,6 @@ def subagent_run(task: str, max_iterations: int = 100) -> str:
     whitelist_schemas = _build_whitelist_schemas()
 
     # 构建实时状态追踪回调
-    import time
     import threading as _thr
 
     task_snippet = task[:42] + "…" if len(task) > 42 else task
@@ -160,6 +192,7 @@ def subagent_run(task: str, max_iterations: int = 100) -> str:
             max_iterations=max_iterations,
             on_progress=_on_progress,
         )
+        _print_done(tool_counter[0], start_time)
         # 更新最终状态
         from team import get_output_engine
         engine = get_output_engine()

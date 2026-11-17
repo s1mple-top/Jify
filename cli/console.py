@@ -307,22 +307,7 @@ class CLIConsole(BaseStreamConsumer):
                 task_desc = "".join(kept) + "…"
             self._output.queue_output(Text(f"Task({task_desc})…", style="bold white"))
 
-            def _exec_subagent(tid, tname, targs):
-                import threading as _thr
-                try:
-                    inner_result = registry.dispatch(tname, targs)
-                    from subagent import _subagent_stats
-                    stats = _subagent_stats.pop(_thr.get_ident(), {"tool_uses": 0, "elapsed": 0})
-                    return json.dumps({
-                        "__sa_stats__": stats,
-                        "result": inner_result,
-                    }, ensure_ascii=False)
-                except Exception as e:
-                    return json.dumps({"error": str(e)}, ensure_ascii=False)
-
-            return _exec_subagent
-
-        if name.startswith("team_"):
+        elif name.startswith("team_"):
             team_label = {
                 "team_delegate": "Delegate",
                 "team_delegate_parallel": "Delegate Parallel",
@@ -334,12 +319,7 @@ class CLIConsole(BaseStreamConsumer):
             self._output.queue_output(Text(""))
             self._output.queue_output(Text(f"⚙ {team_label}…", style="bold white"))
 
-            def _exec_team(tid, tname, targs):
-                return registry.dispatch(tname, targs)
-
-            return _exec_team
-
-        if name == "read_file":
+        elif name == "read_file":
             try:
                 tool_args = json.loads(args_str) if args_str else {}
             except Exception:
@@ -371,10 +351,9 @@ class CLIConsole(BaseStreamConsumer):
             except Exception as e:
                 return json.dumps({"error": str(e)}, ensure_ascii=False)
 
-        # 交给后续的_execute_tools执行 同步执行策略
-        if name != "patch_file" and name != "write_file":
-            return _exec
-        return None
+        # 是否真的预执行由 BaseStreamConsumer._fire_tool 按只读白名单决定，
+        # 这里只负责渲染调用行并给出执行闭包
+        return _exec
 
     def _on_future_result(self, tc_id, future, pre_results, tc_names, tc_args,
                           timeout: float = 120.0, call_ctx=None) -> None:
@@ -395,33 +374,6 @@ class CLIConsole(BaseStreamConsumer):
                 payload = json.dumps({"error": str(e)}, ensure_ascii=False)
             pre_results[f"{_err_name}:{json.dumps(_err_args, sort_keys=True)}"] = payload
             return
-
-        try:
-            data = json.loads(raw)
-            if isinstance(data, dict) and "__sa_stats__" in data:
-                stats = data["__sa_stats__"]
-                tool_uses = stats.get("tool_uses", 0)
-                elapsed = stats.get("elapsed", 0)
-                sent_est = stats.get("sent_est", 0)
-                recv_est = stats.get("recv_est", 0)
-                token_str = ""
-                if sent_est:
-                    # 初期架构设计的缺陷，暂时使用预估的token计数
-                    token_str += f" · ↑ {OutputEngine.fmt_tokens(sent_est // 2)} tokens"
-                if recv_est:
-                    token_str += f" · ↓ {OutputEngine.fmt_tokens(recv_est // 2)} tokens"
-                self._output.queue_output(Text(
-                    f"  ⏻  Done ({tool_uses} tool uses · {OutputEngine.fmt_elapsed(elapsed)}{token_str})",
-                    style=JifyTheme.SUBTLE
-                ))
-                # 不清 slot：subagent_run 自身 finally 已按 key 回收，
-                # 这里若清全部会把并发运行的其它 subagent 行一起抹掉
-                _sa_name = tc_names.get(tc_id, "subagent_run")
-                _sa_args = tc_args.get(tc_id, {})
-                pre_results[f"{_sa_name}:{json.dumps(_sa_args, sort_keys=True)}"] = data["result"]
-                return
-        except (json.JSONDecodeError, TypeError):
-            pass
 
         _tool_name = tc_names.get(tc_id, "")
         _tool_args = tc_args.get(tc_id, {})

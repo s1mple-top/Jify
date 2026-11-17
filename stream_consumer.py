@@ -16,6 +16,7 @@ import time
 from typing import Any, Dict, Optional
 
 from tools.call_context import CallContext, set_call_context, reset_call_context
+from tools.parallel import FIRE_SAFE_TOOLS
 from event_bus import event_bus, UIEvent
 
 
@@ -161,7 +162,10 @@ class BaseStreamConsumer:
                                             tc_names, tc_args, tc_id_to_idx, fire_ctxs)
                             _fired_indices.add(cidx)
 
-                elif last_seen_idx >= 0 and pending_futures:
+                elif last_seen_idx >= 0:
+                    # 流已不再吐 tool delta，视为当前 tool_calls 块结束：立即渲染调用行。
+                    # 不依赖 pending_futures——有副作用工具不预执行，pool 永远为空，
+                    # 若继续用它做门槛，调用行会攒到整条流结束才一起刷出。
                     for cidx in list(tool_call_chunks.keys()):
                         if cidx not in _fired_indices:
                             self._fire_tool(cidx, tool_call_chunks, pending_futures,
@@ -252,14 +256,21 @@ class BaseStreamConsumer:
 
         try:
             args = json.loads(args_str) if args_str else {}
+            args_ok = True
         except Exception:
             args = {}
+            args_ok = False
 
         if tc_args is not None:
             tc_args[tc_id] = args
 
         exec_fn = self._prepare_tool_submit(tc_id, name, args, args_str, registry)
         if exec_fn is not None:
+            # 有副作用工具不预执行：交错流下 arguments 可能只到一半，解析失败降级成 {}
+            # 就是一次空参调用；解析成功也可能缺字段（半截但合法）。这类调用一律交给
+            # agent_loop._execute_tools 用完整参数执行。
+            if not args_ok or name not in FIRE_SAFE_TOOLS:
+                return
             # 显式传播当前 context（含主 Agent config），使 worker 线程中的 subagent_run 能复用
             ctx = contextvars.copy_context()
             call_ctx = CallContext()
@@ -353,6 +364,15 @@ class BaseStreamConsumer:
     def _on_future_result(self, tc_id, future, pre_results, tc_names, tc_args,
                           timeout: float = 120.0,
                           call_ctx: Optional[CallContext] = None) -> None:
+        pass
+
+    def _on_tool_result(self, tool_id: str, name: str, args: Any,
+                        result: str, is_error: bool = False) -> None:
+        """非预执行路径（有副作用工具）的执行结果回报。
+
+        预执行路径的结果由 _on_future_result 处理；有副作用工具不预执行后，
+        这里成为它们唯一的结果回报点，用于 WebUI 展示工具结果。
+        """
         pass
 
     def _finalize_stream(self, stream_error: Optional[Exception]) -> None:

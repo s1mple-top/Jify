@@ -6,11 +6,14 @@ consume_stream / _fire_tool 骨架继承自 BaseStreamConsumer（stream_consumer
 
 import json as _json
 import queue
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import WebSocket
 from stream_consumer import BaseStreamConsumer
 from event_bus import event_bus
+
+# 工具结果回传前端时的截断长度（前端卡片只展示 300 字符）
+_TOOL_RESULT_PREVIEW_CHARS = 4000
 
 
 class WebSocketConsole(BaseStreamConsumer):
@@ -204,3 +207,20 @@ class WebSocketConsole(BaseStreamConsumer):
         else:
             self._send({"type": "tool_result", "tool_id": tid, "result": raw})
         pre_results[_sig] = raw
+
+    def _on_tool_result(self, tool_id: str, name: str, args: Any,
+                        result: str, is_error: bool = False) -> None:
+        """非预执行工具（exec / write_file / subagent_run / team_* 等）的结果回报。
+
+        这些工具不走流式预执行，其 tool_start 已由 _prepare_tool_submit 发出，
+        若这里不回结果，前端卡片会一直停在「执行工具」状态。
+        前端只展示 300 字符，这里先截断：exec 等工具的输出可达数 MB，
+        整段塞进 ws 消息会让前端 JSON.parse 卡住，也白占带宽。
+        """
+        if len(result) > _TOOL_RESULT_PREVIEW_CHARS:
+            result = (result[:_TOOL_RESULT_PREVIEW_CHARS]
+                      + f"\n…（已截断，完整 {len(result)} 字符）")
+        if is_error:
+            self._send({"type": "tool_error", "tool_id": tool_id, "error": result})
+        else:
+            self._send({"type": "tool_result", "tool_id": tool_id, "result": result})

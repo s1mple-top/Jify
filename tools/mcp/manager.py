@@ -261,7 +261,7 @@ class MCPManager:
                         f"unsupported transport '{cfg.transport}' "
                         f"for server '{cfg.name}' — skipped"
                     )
-                    logger.warning(msg)
+                    logger.debug(msg)
                     print(f"  MCP:  {msg}")
                     continue
 
@@ -404,7 +404,7 @@ class MCPManager:
                         entry["connected"] = True
                     logger.info(f"MCP server '{server_name}' reconnected")
                 except Exception as e:
-                    logger.warning(
+                    logger.debug(
                         f"MCP server '{server_name}' reconnection failed: {e}"
                     )
                     if attempt == self._MAX_RECONNECT_RETRIES - 1:
@@ -417,7 +417,7 @@ class MCPManager:
             try:
                 return conn.call_tool(tool_name, arguments)
             except Exception as e:
-                logger.warning(
+                logger.debug(
                     f"MCP tool '{server_name}/{tool_name}' failed: {e}"
                 )
                 # 连接可能已死，标记断开，触发下一轮重连

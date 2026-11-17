@@ -402,6 +402,27 @@ def _result_is_error(raw: str) -> bool:
     return isinstance(parsed, dict) and bool(parsed.get("error"))
 
 
+def _sanitize_tool_calls_for_transport(tool_calls: List[Dict]) -> List[Dict]:
+    """回传前把非法 arguments 换成 "{}"，只影响线上请求，不动本地记录。
+
+    参数不完整/半截 JSON 会被 _execute_tools 拒绝执行，但 assistant 消息带着原始串
+    留在历史里，之后每一轮都会随请求重发。校验 arguments 的网关会因此一直 400，
+    且这条坏消息不会自己消失。这里给出合法占位，避免把一次参数异常变成持久故障。
+    返回新对象：调用方后续还要拿原始 arguments 做拒绝执行的判定。
+    """
+    out = []
+    for tc in tool_calls:
+        fn = tc.get("function", {})
+        raw = fn.get("arguments", "")
+        if isinstance(raw, str) and raw.strip():
+            try:
+                json.loads(raw)
+            except ValueError:
+                tc = {**tc, "function": {**fn, "arguments": "{}"}}
+        out.append(tc)
+    return out
+
+
 def _timed_out_call(tc: "ToolCall", timeout: float, elapsed: float,
                     ctx: Optional[CallContext] = None) -> "ToolCall":
     """为超时的工具调用构造独立结果对象。
@@ -763,7 +784,7 @@ class AgentLoop:
 
         if missing_total:
             self.messages = repaired
-            logger.warning("repaired %d dangling tool_calls from interrupted turn", missing_total)
+            logger.debug("repaired %d dangling tool_calls from interrupted turn", missing_total)
 
     def run(self, message_id: str, user_message: str, system_prompt: str, console,
             tool_schemas, initial_messages: Optional[List[Message]] = None) -> Dict[str, Any]:
@@ -947,8 +968,9 @@ class AgentLoop:
             # 流读取错误（stall / 服务端断流）被 consume_stream 吞掉后会返回
             # 空或不完整的 tool_calls。判据必须看 finish_reason 而不是「有没有
             # tool_calls」：流中途断掉时 tool_calls 可能已吐出大半，arguments 却是
-            # 截断的 json（解析降级为 {}），拿去执行等于用空参数调用工具。
-            # 只有 finish_reason 表明模型正常结束，才能认为 tool_calls 完整。
+            # 截断的 json。被截断的串多半解析失败、由 _execute_tools 拒执行，但
+            # 恰好截到合法 JSON（如少一个字段）时仍会被执行，故完整性只能靠
+            # finish_reason 判定：只有它表明模型正常结束，才能认为 tool_calls 完整。
             _stream_error = getattr(console, "last_stream_error", None)
             _stream_complete = finish_reason in (
                 "tool_calls", "stop", "length", "content_filter", "pause_turn")
@@ -1174,12 +1196,33 @@ class AgentLoop:
         # 按原始 tool_calls 下标占位，保证返回顺序与模型给出的顺序一致
         slots: List[Optional[ToolCall]] = [None] * len(tool_calls)
         enhanced: List[Tuple[int, ToolCall]] = []
+        # 本函数内才产生结果的调用（预执行命中的结果在流式阶段已回报过，不能重复发）
+        produced: set = set()
 
         for idx, tc in enumerate(tool_calls):
+            raw_args = tc["function"]["arguments"]
+            try:
+                args = json.loads(raw_args) if raw_args else {}
+            except Exception as e:
+                # 参数非法绝不当空参执行：会把「半截 JSON」变成一次性无参调用
+                # （exec / write_file 这类工具照样会跑）。直接回错误让模型重发。
+                tcall = ToolCall(
+                    id=tc["id"],
+                    name=tc["function"]["name"],
+                    args={},
+                )
+                tcall.result = json.dumps(
+                    {"error": f"工具参数不是合法 JSON，已拒绝执行: {e}"},
+                    ensure_ascii=False)
+                tcall.duration = 0
+                tcall.error = True
+                slots[idx] = tcall
+                produced.add(idx)
+                continue
             tcall = ToolCall(
                 id=tc["id"],
                 name=tc["function"]["name"],
-                args=json.loads(tc["function"]["arguments"]) if tc["function"]["arguments"] else {},
+                args=args,
             )
             # 流式预执行命中（按 name:json(args) 匹配）
             _sig = f"{tcall.name}:{json.dumps(tcall.args, sort_keys=True)}"
@@ -1191,19 +1234,23 @@ class AgentLoop:
             else:
                 enhanced.append((idx, tcall))
 
-        # 全部预执行完成 → 直接返回
-        if not enhanced:
-            return [tc for tc in slots if tc is not None]
+        if enhanced:
+            # 剩余工具按策略执行
+            pending = [tc for _, tc in enhanced]
+            if should_parallel(pending):
+                done = self._execute_parallel(pending)
+            else:
+                done = self._execute_sequential(pending)
+            for (idx, _), tc_result in zip(enhanced, done):
+                slots[idx] = tc_result
+                produced.add(idx)
 
-        # 剩余工具按策略执行
-        pending = [tc for _, tc in enhanced]
-        if should_parallel(pending):
-            done = self._execute_parallel(pending)
-        else:
-            done = self._execute_sequential(pending)
-
-        for (idx, _), tc_result in zip(enhanced, done):
-            slots[idx] = tc_result
+        # 非预执行路径的结果回报：预执行命中已在流式阶段回报过，重复发会让
+        # 前端同一卡片被写两次。CLI 的 _on_tool_result 是空实现。
+        for idx in sorted(produced):
+            tc = slots[idx]
+            self._console._on_tool_result(tc.id, tc.name, tc.args,
+                                          tc.result or "", bool(tc.error))
 
         return [tc for tc in slots if tc is not None]
 
@@ -1405,7 +1452,8 @@ class AgentLoop:
                     if msg.thinking_blocks:
                         m["thinking_blocks"] = msg.thinking_blocks
                 if msg.tool_calls:
-                    m["tool_calls"] = msg.tool_calls
+                    # 非法/半截 arguments 换成 "{}" 再上行，本地记录保持原样
+                    m["tool_calls"] = _sanitize_tool_calls_for_transport(msg.tool_calls)
                 if msg.tool_call_id:
                     m["tool_call_id"] = msg.tool_call_id
                 api_messages.append(m)
@@ -1460,20 +1508,15 @@ class AgentLoop:
         for idx in sorted(tool_call_chunks.keys()):
             tc_data = tool_call_chunks[idx]
             fn = tc_data.get("function", {})
-            name = fn.get("name", "") or ""
-            args_str = fn.get("arguments", "{}") or "{}"
-
-            # 解析 arguments 为 dict，再序列化为 JSON string
-            try:
-                args = json.loads(args_str)
-            except Exception:
-                args = {}
+            # arguments 原样保留：这里解析成 dict 再序列化，会把半截 JSON 静默降级成 {}，
+            # 等于用空参调用工具（exec 收到 '{"command": "rm -rf' 会照常执行）。合法性
+            # 由 _execute_tools 判定，不合法直接拒绝执行并回错误给模型。
             tool_calls.append({
                 "id": tc_data.get("id") or f"call_{uuid.uuid4().hex[:8]}",
                 "type": "function",
                 "function": {
-                    "name": name,
-                    "arguments": json.dumps(args)
+                    "name": fn.get("name", "") or "",
+                    "arguments": fn.get("arguments", "") or "{}"
                 }
             })
         return tool_calls
@@ -2106,7 +2149,7 @@ class AgentLoop:
         head_msgs.append(self.messages[turn_start_idx])
         self._replace_messages(head_msgs + kept)
         self._turn_start_idx = len(head_msgs) - 1
-        logger.warning("summarizer unavailable, peeled %d/%d api rounds", drop, len(groups))
+        logger.debug("summarizer unavailable, peeled %d/%d api rounds", drop, len(groups))
         return True
 
     def _fold_api_rounds(self, head: List[Message], turn_start_idx: int) -> bool:
