@@ -470,6 +470,9 @@ class AgentLoop:
         # to_thread，而 agent.run 仍在另一线程持续写 stream），无锁会导致
         # 两边同时看到 None、各建一个 session，stream 与 messages 挂到不同 id 上
         self._session_id_lock = threading.Lock()
+        # sessions 表里是否已为本会话建过行。会话行延迟到首次产生内容时才落库，
+        # 避免「只建连接 / 新建后一言不发 / 刷新页面」留下空壳会话记录。
+        self._session_row_created: bool = False
         self._resume_messages: List[Message] = []  # /resume 加载的历史消息
         self._last_api_error: Optional[str] = None
         self._emergency_count: int = 0  # 本轮紧急压缩累计次数，run() 开始时复位（见 emergency_compress_limit）
@@ -531,6 +534,7 @@ class AgentLoop:
         # 同时让「clear 后未聊天就退出」的保存走 return None 路径（CLI 不再误报可 resume）
         with self._session_id_lock:
             self._session_id = None
+            self._session_row_created = False
 
     def clear_reasoning_content(self) -> None:
         """切换模型后清空历史消息中的 reasoning_content，避免跨供应商残留污染。
@@ -553,31 +557,46 @@ class AgentLoop:
 
     # 会话持久化
     def _ensure_session(self) -> Optional[str]:
-        """返回当前会话 id，不存在则创建。唯一允许写 _session_id 的入口。
+        """返回当前会话 id，不存在则生成一个（**不落库**）。唯一允许写 _session_id 的入口。
 
-        用双检锁把「检查-创建-赋值」收敛成一次串行的原子操作：单会话内多个
-        线程（save 的 to_thread 工作线程、run 内的 stream 写线程）同时首次
-        落库时，只有一个能真正创建，其余拿到同一个结果。
+        只生成 id、不建 sessions 记录：会话行在「首次真正产生内容」时才落库
+        （见 _ensure_session_row / save_messages 的 upsert）。这样单纯建立连接、
+        新建会话后一言不发、页面刷新等路径都不会在 sessions 表留下空壳记录。
 
-        创建时的 SQLite IO 在持锁期间执行（只发生一次），避免出现
-        「先放锁再创建」被另一线程插队的问题。失败返回 None，调用方按需降级。
+        用双检锁把「检查-赋值」收敛成一次串行的原子操作：单会话内多个线程
+        （save 的 to_thread 工作线程、run 内的 stream 写线程）同时首次取 id 时，
+        只有一个能写入，其余拿到同一个结果。纯内存操作，无 IO。
         """
         sid = self._session_id
         if sid is not None:
             return sid
         with self._session_id_lock:
-            if self._session_id is not None:   # 二次检查：锁外等待期间可能已被建好
+            if self._session_id is not None:   # 二次检查：锁外等待期间可能已被写好
                 return self._session_id
-            from storage.db import get_db
-            try:
-                self._session_id = get_db().create_session(
-                    jify_name="cli",
-                    model=getattr(self.config, "model", ""),
-                )
-            except Exception:
-                logger.debug("ensure_session failed", exc_info=True)
-                return None
+            self._session_id = uuid.uuid4().hex[:8]
             return self._session_id
+
+    def _ensure_session_row(self) -> Optional[str]:
+        """确保 sessions 表存在当前会话记录（有真实内容时才调用）。
+
+        幂等，内部用 INSERT OR IGNORE。已经建过就只走内存标志位，不再碰磁盘。
+        """
+        sid = self._ensure_session()
+        if sid is None:
+            return None
+        if self._session_row_created:
+            return sid
+        from storage.db import get_db
+        try:
+            get_db().create_session(
+                jify_name="cli",
+                model=getattr(self.config, "model", ""),
+                session_id=sid,
+            )
+            self._session_row_created = True
+        except Exception:
+            logger.debug("ensure_session_row failed", exc_info=True)
+        return sid
 
     def save_conversation(self) -> Optional[str]:
         """将当前会话全部消息写入 SQLite，返回 session_id。
@@ -627,7 +646,7 @@ class AgentLoop:
             raw.append({"role": m.role, "content": content})
 
         db = get_db()
-        session_id = self._ensure_session()
+        session_id = self._ensure_session_row()
         if session_id is None:
             return None
         db.save_messages(
@@ -651,7 +670,9 @@ class AgentLoop:
         """
         try:
             from storage.stream import get_stream_store
-            session_id = self._ensure_session()
+            # 首次真正写消息时才建 sessions 行：stream 表没有外键约束，
+            # 但列表/恢复都以 sessions 行为准，缺行会导致会话在 UI 上不可见。
+            session_id = self._ensure_session_row()
             if session_id is None:
                 return None
             from storage.stream import set_current_session

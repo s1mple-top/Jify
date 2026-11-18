@@ -10,6 +10,7 @@
 审批请求通过队列序列化，由独立 consumer 线程串行读取 input()，
 调用线程阻塞在 Future 上等待审批结果。
 """
+import contextvars
 import json
 import os
 import queue
@@ -77,6 +78,31 @@ def set_web_bridge(bridge) -> None:
     _web_bridge = bridge
 
 
+# 审批请求的会话归属（contextvar）。
+# 用途：gateway 多标签页/多会话时，每个 WS 连接只应收到「自己会话」的审批弹窗。
+# 由 WS 处理端在调用 agent.run 前设置；asyncio.to_thread 会传播 contextvars，
+# 因此工具线程里调 request_approval 时能读到。未设置（None）时退化为「谁都能取」，
+# 与改造前行为一致，兼容子线程 / 后台任务等无归属调用。
+_approval_owner: 'contextvars.ContextVar[Optional[str]]' = \
+    contextvars.ContextVar('jify_approval_owner', default=None)
+
+
+def set_approval_owner(owner: Optional[str]):
+    """设置当前上下文的审批归属，返回 token 供 reset 使用。"""
+    return _approval_owner.set(owner)
+
+
+def reset_approval_owner(token) -> None:
+    try:
+        _approval_owner.reset(token)
+    except ValueError:
+        pass  # token 来自其他 Context（跨线程边界），忽略
+
+
+def get_approval_owner() -> Optional[str]:
+    return _approval_owner.get()
+
+
 class ApprovalBridge:
     """Web 审批桥（线程安全单例）。
 
@@ -94,7 +120,8 @@ class ApprovalBridge:
     def __init__(self):
         self._pending: Dict[str, tuple] = {}  # aid -> (Future, tool_name)
         self._lock = threading.Lock()
-        self._queue: queue.Queue = queue.Queue()  # 待推送的审批请求
+        # 待推送请求改为带锁的列表：poll 需按归属挑取，queue.Queue 只能先进先出
+        self._queue: list = []
 
     def request(self, tool_name: str, args: dict, preview: Optional[str],
                 timeout: float = 120.0) -> bool:
@@ -103,25 +130,40 @@ class ApprovalBridge:
         f: Future = Future()
         with self._lock:
             self._pending[aid] = (f, tool_name)
-        self._queue.put({
-            "id": aid,
-            "tool_name": tool_name,
-            "args": args,
-            "preview": preview,
-        })
+            self._queue.append({
+                "id": aid,
+                "tool_name": tool_name,
+                "args": args,
+                "preview": preview,
+                # 归属会话：让对应 WS 连接认领，避免多标签页串台
+                "_owner": get_approval_owner(),
+            })
         try:
             return f.result(timeout=timeout)
         except TimeoutError:
             with self._lock:
                 self._pending.pop(aid, None)
+                self._queue = [it for it in self._queue if it.get("id") != aid]
             raise ApprovalBreak(tool_name)
 
-    def poll(self) -> Optional[dict]:
-        """非阻塞取出一个待推送的审批请求；无则返回 None。"""
-        try:
-            return self._queue.get_nowait()
-        except queue.Empty:
-            return None
+    def poll(self, owner: Optional[str] = None) -> Optional[dict]:
+        """取出一个待推送的审批请求；无则返回 None。
+
+        owner 为调用方（WS 连接）的会话 id：
+          - 请求归属相同 → 可取
+          - 请求无归属（None）→ 任一方可取（后台/子线程发起的审批）
+          - 归属不同 → 跳过，留给对应连接
+        owner 传 None 表示不按归属过滤（等价改造前行为）。
+        """
+        with self._lock:
+            for i, item in enumerate(self._queue):
+                req_owner = item.get("_owner")
+                if owner is None or req_owner is None or req_owner == owner:
+                    self._queue.pop(i)
+                    out = dict(item)
+                    out.pop("_owner", None)
+                    return out
+        return None
 
     def respond(self, aid: str, approved: bool, break_loop: bool) -> bool:
         """前端回传审批结果，回填 Future。返回是否成功（aid 存在且未完成）。"""

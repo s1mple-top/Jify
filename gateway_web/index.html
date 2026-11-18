@@ -302,6 +302,10 @@ body {
 #status-bar.idle .dot { background: #a3a3a3; }
 #status-bar.thinking .dot { background: #f59e0b; animation: pulse 1s infinite; box-shadow: 0 0 8px rgba(245,158,11,.4); }
 #status-bar.compressing .dot { background: #eab308; animation: pulse .6s infinite; }
+#status-bar.reconnecting .dot { background: #f59e0b; animation: pulse 1s infinite; }
+#status-bar.disconnected .dot { background: #dc2626; }
+#status-bar.clickable { cursor: pointer; }
+#status-bar.clickable:hover { background: #fdf0dd; border-color: #d4c5a9; }
 @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.8)} }
 
 /* ── Chat Area ── */
@@ -438,30 +442,42 @@ body {
 }
 .tool-msg .result:empty::after { content: '执行中...'; color: #a0907a; }
 
-/* Todo panel */
-.todo-panel {
-  margin: 10px 0 10px 54px;
+/* Todo dock（输入区上方固定任务条） */
+#todo-dock {
+  display: none;
+  margin: 8px 20px 0;
   background: #fff;
   border: 1px solid #e8ddcc;
   border-left: 3px solid #b45309;
   border-radius: 8px;
-  padding: 10px 14px;
-  max-width: 68%;
 }
-.todo-panel .todo-head {
-  font-size: 12px; font-weight: 700; color: #b45309;
-  margin-bottom: 8px;
+#todo-dock.visible { display: block; }
+.todo-dock-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 12px;
+  font-size: 11px; font-weight: 700; color: #b45309;
+  cursor: pointer; user-select: none;
 }
-.todo-panel .todo-count {
-  color: #a0907a; font-weight: 600; margin-left: 6px;
+.todo-dock-arrow { flex-shrink: 0; font-size: 9px; transition: transform .15s; }
+#todo-dock.collapsed .todo-dock-arrow { transform: rotate(-90deg); }
+.todo-dock-count { color: #a0907a; font-weight: 600; margin-left: 2px; }
+.todo-dock-current {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #8b7355; font-weight: 400; font-size: 11px;
 }
+.todo-dock-body {
+  max-height: 160px; overflow-y: auto;
+  border-top: 1px solid #f0e6d6;
+  padding: 4px 12px 6px;
+}
+#todo-dock.collapsed .todo-dock-body { display: none; }
 .todo-item {
   display: flex; align-items: baseline; gap: 6px;
   font-size: 12px; color: #4a4235;
   padding: 2px 0;
 }
 .todo-icon { flex-shrink: 0; font-size: 12px; }
-.todo-content { flex: 1; line-height: 1.5; }
+.todo-content { flex: 1; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .todo-priority {
   font-size: 10px; color: #a0907a;
   border: 1px solid #e8ddcc; border-radius: 4px;
@@ -745,6 +761,15 @@ body {
       </div>
     </div>
     <div id="input-area-wrap">
+      <div id="todo-dock" class="collapsed">
+        <div class="todo-dock-head" onclick="toggleTodoDock()">
+          <span class="todo-dock-arrow">&#9662;</span>
+          <span id="todo-dock-title">&#20219;&#21153;&#21015;&#34920;</span>
+          <span class="todo-dock-count" id="todo-dock-count">0/0</span>
+          <span class="todo-dock-current" id="todo-dock-current"></span>
+        </div>
+        <div class="todo-dock-body" id="todo-dock-body"></div>
+      </div>
       <div id="model-bar">
         <span class="model-bar-label">模型</span>
         <select id="model-select" title="当前会话使用的模型"><option value="">加载中...</option></select>
@@ -815,7 +840,6 @@ body {
   var sessions = [];           // [{id, title}]
   var activeSessionId = null;
   var sessionHtmlCache = {};   // {id: html}
-  var switching = false;
   var running = false;
 
   // 加载 skills 列表
@@ -1037,7 +1061,6 @@ body {
   var chatEl = document.getElementById('chat');
   var emptyState = chatEl.querySelector('.empty-state');
   var hasMessages = false;
-  var todoPanel = null;
   var teamPanel = null;
   var teamWorkers = {};
   var lastDoneContent = '';
@@ -1119,12 +1142,16 @@ body {
     return nodes[nodes.length - 1].querySelector('.result');
   }
 
-  function setStatus(phase, text) {
+  function setStatus(phase, text, clickable) {
     var bar = $('status-bar');
     bar.className = phase;
     $('status-text').textContent = text;
+    bar.classList.toggle('clickable', !!clickable);
+    bar.onclick = clickable ? window.retryConnect : null;
     var stop = $('stop-btn');
-    stop.style.display = (phase === 'idle') ? 'none' : 'inline-flex';
+    // 断线/重连态下没有可中断的任务，不显示停止按钮
+    var idleLike = (phase === 'idle' || phase === 'disconnected' || phase === 'reconnecting');
+    stop.style.display = idleLike ? 'none' : 'inline-flex';
   }
 
   function addThinking() {
@@ -1143,15 +1170,16 @@ body {
   var TEAM_SYMBOL = { pending: '\u25cb', running: '\u23f3', completed: '\u2713', failed: '\u2717' };
 
   function renderTodo(todos) {
+    var dock = $('todo-dock');
+    if (!dock) return;
     if (!todos || !todos.length) {
-      if (todoPanel) { todoPanel.remove(); todoPanel = null; }
+      dock.classList.remove('visible');
+      $('todo-dock-body').innerHTML = '';
+      $('todo-dock-count').textContent = '0/0';
+      $('todo-dock-current').textContent = '';
       return;
     }
-    if (!todoPanel) {
-      todoPanel = document.createElement('div');
-      todoPanel.className = 'todo-panel';
-      chatEl.appendChild(todoPanel);
-    }
+    dock.classList.add('visible');
     var order = { high: 0, medium: 1, low: 2 };
     var sorted = todos.slice().sort(function(a, b) {
       return (order[a.priority] || 2) - (order[b.priority] || 2);
@@ -1163,15 +1191,36 @@ body {
       var pl = PRIORITY_LABEL[t.priority] || '';
       return '<div class="todo-item">' +
         '<span class="todo-icon" style="color:' + color + '">' + icon + '</span>' +
-        '<span class="todo-content">' + esc(t.content) + '</span>' +
+        '<span class="todo-content" title="' + esc(t.content) + '">' + esc(t.content) + '</span>' +
         (pl ? '<span class="todo-priority">' + pl + '</span>' : '') +
         '</div>';
     }).join('');
-    todoPanel.innerHTML =
-      '<div class="todo-head">\u4efb\u52a1\u5217\u8868 <span class="todo-count">' + done + '/' + todos.length + '</span></div>' +
-      rows;
-    scrollDown();
+    $('todo-dock-body').innerHTML = rows;
+    $('todo-dock-count').textContent = done + '/' + todos.length;
+    var cur = todos.filter(function(t) { return t.status === 'in_progress'; })[0];
+    $('todo-dock-current').textContent = cur ? (TODO_ICON.in_progress + ' ' + cur.content) : '';
   }
+
+  // 折叠状态记忆：默认展开，用户折叠后跨会话/刷新保持
+  window.toggleTodoDock = function() {
+    var dock = $('todo-dock');
+    dock.classList.toggle('collapsed');
+    try {
+      localStorage.setItem('jify_todo_collapsed', dock.classList.contains('collapsed') ? '1' : '0');
+    } catch (e) { /* 隐私模式下 localStorage 不可用，忽略 */ }
+  };
+  (function() {
+    var dock = $('todo-dock');
+    if (dock) {
+      try {
+        // 显式处理两种已记忆状态：只判 '1' 会漏掉「用户展开过」的情况，
+        // 刷新后会被 HTML 默认的 collapsed 类覆盖回折叠态
+        var saved = localStorage.getItem('jify_todo_collapsed');
+        if (saved === '1') dock.classList.add('collapsed');
+        else if (saved === '0') dock.classList.remove('collapsed');
+      } catch (e) { /* 隐私模式下 localStorage 不可用，保持 HTML 默认 */ }
+    }
+  })();
 
   function addDiffCard(content) {
     var div = addMsg(
@@ -1226,12 +1275,62 @@ body {
     return d.innerHTML;
   }
 
+  // markdown 输出的标签/属性白名单。marked 不做 HTML 清洗，而模型回复里可能
+  // 夹带外部内容（搜索结果、抓取的网页、文件内容），一旦被诱导输出
+  // <img onerror=...> 之类就会在页面上执行脚本；历史还会落库变成存储型。
+  var MD_SAFE_TAGS = ' p br hr h1 h2 h3 h4 h5 h6 ul ol li blockquote pre code '
+    + 'em strong b i del s a img table thead tbody tr th td input ';
+  var MD_SAFE_ATTRS = {
+    a: ['href', 'title'],
+    img: ['src', 'alt', 'title'],
+    code: ['class'],
+    input: ['type', 'checked', 'disabled'],
+    th: ['align'],
+    td: ['align']
+  };
+
+  // 用 DOMParser 离线解析（text/html 模式下脚本不会执行），按白名单裁剪后回填。
+  function sanitizeMarkdownHtml(html) {
+    if (typeof DOMParser === 'undefined') return esc(html);
+    var root;
+    try {
+      root = new DOMParser().parseFromString(html, 'text/html').body;
+    } catch (e) {
+      return esc(html);  // 解析异常一律降级为纯文本，宁可不渲染也不执行
+    }
+    if (!root) return esc(html);
+    var nodes = root.querySelectorAll('*');
+    // 倒序遍历：删父节点后其子节点已脱离文档，不会误伤后续判断
+    for (var i = nodes.length - 1; i >= 0; i--) {
+      var el = nodes[i];
+      var tag = el.tagName.toLowerCase();
+      if (MD_SAFE_TAGS.indexOf(' ' + tag + ' ') === -1) {
+        if (el.parentNode) el.parentNode.removeChild(el);
+        continue;
+      }
+      var allowed = MD_SAFE_ATTRS[tag] || [];
+      var attrs = el.attributes;
+      for (var j = attrs.length - 1; j >= 0; j--) {
+        var name = attrs[j].name.toLowerCase();
+        var ok = allowed.indexOf(name) !== -1;
+        if (ok && (name === 'href' || name === 'src')) {
+          var val = (attrs[j].value || '').trim().toLowerCase().replace(/[\s\u0000-\u001f]/g, '');
+          ok = val.indexOf('javascript:') !== 0
+            && val.indexOf('data:') !== 0
+            && val.indexOf('vbscript:') !== 0;
+        }
+        if (!ok) el.removeAttribute(attrs[j].name);
+      }
+    }
+    return root.innerHTML;
+  }
+
   // 统一 markdown 渲染：marked 不可用时降级为纯文本（保留换行），
   // 避免 marked.parse 抛 ReferenceError 导致气泡永久空白
   function renderMarkdown(text) {
     var src = (text || '').replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n');
     if (typeof marked !== 'undefined' && marked.parse) {
-      try { return marked.parse(src); } catch (e) { /* 落到纯文本降级 */ }
+      try { return sanitizeMarkdownHtml(marked.parse(src)); } catch (e) { /* 落到纯文本降级 */ }
     }
     return '<p>' + esc(src).replace(/\n/g, '<br>') + '</p>';
   }
@@ -1282,35 +1381,70 @@ body {
     currentMsgEl = null;
     thinkingEl = null;
     rawMarkdown = '';
-    todoPanel = null;
     teamPanel = null;
     teamWorkers = {};
     lastDoneContent = '';
+    renderTodo(null);
     setStatus('idle', '就绪');
     scrollDown();
   }
 
+  // 历史会话恢复：从 DB 拉消息渲染（页面刷新/切换到无缓存会话时）
+  function addAssistantDone(text) {
+    return addMsg(
+      '<div class="msg-avatar">' + jifyAvatarSvg + '</div>' +
+      '<div class="bubble"><div class="content">' + renderMarkdown(text) + '</div></div>',
+      'msg-assistant'
+    );
+  }
+
+  function loadHistory(id) {
+    fetch('/api/sessions/' + encodeURIComponent(id) + '/messages?token=' + encodeURIComponent(token))
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var msgs = d.messages || [];
+        if (!msgs.length) return;
+        if (id !== activeSessionId) return;  // 异步期间已切走，丢弃
+        for (var i = 0; i < msgs.length; i++) {
+          var m = msgs[i];
+          if (m.role === 'user') addUser(m.content);
+          else if (m.role === 'assistant') addAssistantDone(m.content);
+        }
+        sessionHtmlCache[id] = chatEl.innerHTML;
+        scrollDown();
+      })
+      .catch(function() { /* DB 无记录或网络错误：保持空聊天区 */ });
+  }
+
   window.switchToSession = function(id) {
+    // 先从面板视图（skills/plugins/config）切回 chat：
+    // 否则点会话项后视图仍停在面板上，看起来像「点不动」；
+    // 且下面的运行中提示是写进 chat 区的，不切回就看不见。
+    switchView('chat');
     if (running) { addSystem('⚠ 当前会话正在运行，无法切换'); return; }
     if (id === activeSessionId) return;
-    switching = true;
     saveCurrentSessionHtml();
     activeSessionId = id;
-    resetChat(sessionHtmlCache[id] || '');
+    var cached = sessionHtmlCache[id];
+    resetChat(cached || '');
+    if (!cached) loadHistory(id);
     renderSessionList();
     connect(id);
   };
 
   window.newSession = function() {
+    // 同 switchToSession：新建后必须回到 chat 视图，否则面板上点「＋」无视觉反馈
+    switchView('chat');
     if (running) { addSystem('⚠ 当前会话正在运行，无法新建'); return; }
     saveCurrentSessionHtml();
     fetch('/api/sessions?token=' + encodeURIComponent(token), { method: 'POST' })
       .then(function(r) { return r.json(); })
       .then(function(d) {
         sessions.unshift({ id: d.id, title: d.title || '新会话' });
-        renderSessionList();
-        switching = true;
+        // 先切 activeSessionId 再渲染：否则列表高亮停留在上一个会话，
+        // 新建后的当前会话看起来没被选中，用户再次点它还会被当成「切换到自己」直接返回
         activeSessionId = d.id;
+        renderSessionList();
         resetChat('');
         connect(d.id);
       })
@@ -1354,27 +1488,83 @@ body {
         }
       })
       .then(function() {
-        renderSessionList();
         activeSessionId = sessions[0].id;
+        renderSessionList();   // 先定 active 再渲染，初始加载才有正确高亮
         connect(activeSessionId);
+        // 页面刷新后 sessionHtmlCache 为空，从 DB 恢复最近会话的聊天记录
+        loadHistory(activeSessionId);
       })
       .catch(function() { /* 忽略初始化错误 */ });
   }
 
+  // ── 断线重连（方案 A：有限重试） ──
+  // 服务端关停或网络中断时浏览器只给 close code 1006，前端无法区分
+  // 「用户 Ctrl+C 停了网关」和「网络抖动」，故采用有限重试：
+  // 1/2/4/8/16 秒共 5 次（约 31 秒）后停止，状态栏变为可点击的手动重连入口。
+  // 重试过程只更新顶部状态栏，不往聊天区 addSystem，避免网关一停就刷屏。
+  var RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000];
+  var reconnectAttempts = 0;
+  var reconnectTimer = null;
+
+  function clearReconnectTimer() {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  }
+
+  function scheduleReconnect() {
+    if (reconnectAttempts >= RECONNECT_DELAYS.length) {
+      setStatus('disconnected', '已断开，点击此处重连', true);
+      return;
+    }
+    var delay = RECONNECT_DELAYS[reconnectAttempts];
+    reconnectAttempts++;
+    setStatus('reconnecting',
+      '连接已断开，' + Math.round(delay / 1000) + ' 秒后重连（第 '
+      + reconnectAttempts + '/' + RECONNECT_DELAYS.length + ' 次）');
+    clearReconnectTimer();
+    reconnectTimer = setTimeout(function() {
+      reconnectTimer = null;
+      connect(activeSessionId);
+    }, delay);
+  }
+
+  window.retryConnect = function() {
+    if (connected) return;
+    clearReconnectTimer();
+    reconnectAttempts = 0;
+    setStatus('reconnecting', '正在重连...');
+    connect(activeSessionId);
+  };
+
   function connect(sessionId) {
-    if (ws) { try { ws.close(); } catch(e) {} }
+    clearReconnectTimer();
+    if (ws) {
+      // 先解绑旧连接的 handler 再 close：否则 close 触发的 onclose 会被当成
+      // 「意外断线」而多启动一轮重连，导致切换会话后出现幽灵重试
+      ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+      try { ws.close(); } catch (e) {}
+    }
 
     var sid = sessionId || '';
     var url = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws?token=' + encodeURIComponent(token) + '&session_id=' + encodeURIComponent(sid);
-    ws = new WebSocket(url);
+    var sock = new WebSocket(url);
+    ws = sock;
 
-    ws.onopen = function() {
+    sock.onopen = function() {
+      if (ws !== sock) return;  // 已被更新的连接替换
       connected = true;
-      switching = false;
+      reconnectAttempts = 0;
+      clearReconnectTimer();
+      // 旧连接的任务已随连接丢失，重置运行时标志，避免「停止」按钮卡住
+      running = false;
+      if (currentMsgEl) { currentMsgEl.classList.remove('streaming'); currentMsgEl = null; }
+      thinkingEl = null;
+      rawMarkdown = '';
+      setStatus('idle', '就绪');
       $('msg-input').focus();
     };
 
-    ws.onmessage = function(e) {
+    sock.onmessage = function(e) {
+      if (ws !== sock) return;
       try { handle(JSON.parse(e.data)); }
       catch(ex) {
         // 不再静默吞掉：渲染异常会直接表现为“只有空气泡”，必须留下线索
@@ -1383,20 +1573,23 @@ body {
       }
     };
 
-    ws.onclose = function(e) {
+    sock.onclose = function(e) {
+      if (ws !== sock) return;  // 旧连接的事件，忽略
       connected = false;
-      if (e.code === 4001) {
+      if (e.code === 4001) {    // 未授权：清登录态回登录页，不重连
+        clearReconnectTimer();
         sessionStorage.clear();
         window.location.href = '/';
         return;
       }
-      if (switching) return;
-      addSystem('✗ 连接已断开');
-      setStatus('idle', '已断开');
+      // 主动切换会话时旧连接已被上面解绑，走不到这里；
+      // 到这里都是真实断线，统一进入有限重连流程
+      scheduleReconnect();
     };
 
-    ws.onerror = function() {
-      addSystem('✗ 连接失败，请确认网关已启动');
+    sock.onerror = function() {
+      // onerror 后浏览器必然紧接一个 onclose，提示统一交给 scheduleReconnect，
+      // 此处不重复写聊天区，避免一次断线出现两条提示
     };
   }
 
@@ -1523,7 +1716,7 @@ body {
       case 'cleared':
         if (activeSessionId) sessionHtmlCache[activeSessionId] = '';
         chatEl.innerHTML = '';
-        todoPanel = null;
+        renderTodo(null);
         teamPanel = null;
         teamWorkers = {};
         lastDoneContent = '';
@@ -1584,7 +1777,9 @@ body {
     if (!text) return;
 
     if (!connected || !ws || ws.readyState !== WebSocket.OPEN) {
-      addSystem('&#9888; 未连接，请退出登录后重新登录');
+      addSystem(reconnectTimer
+        ? '&#9888; 连接已断开，正在自动重连，请稍候'
+        : '&#9888; 连接已断开，点击上方状态栏重连');
       return;
     }
 

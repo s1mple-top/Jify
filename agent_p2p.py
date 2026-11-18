@@ -314,7 +314,7 @@ class AutoAgent:
                 )
                 try:
                     send_frame(sock, welcome.to_json().encode())
-                except:
+                except Exception:
                     pass
                 return True
             except Exception:
@@ -598,7 +598,7 @@ class AutoAgent:
             )
             try:
                 send_frame(sock, pong.to_json().encode())
-            except:
+            except Exception:
                 self._remove_peer(peer)
         elif msg_type == "pong":
             pass

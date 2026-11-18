@@ -65,13 +65,18 @@ class ConversationDB:
 
 
     # 会话操作
-    def create_session(self, jify_name: str = "", model: str = "") -> str:
-        """创建新会话，返回 session_id"""
-        session_id = uuid.uuid4().hex[:8]
+    def create_session(self, jify_name: str = "", model: str = "",
+                       session_id: Optional[str] = None) -> str:
+        """创建会话记录，返回 session_id。
+
+        幂等：同一 id 重复调用不会报错也不会覆盖已有记录（INSERT OR IGNORE）。
+        这样「首次真正产生内容时补建记录」可以安全地重复触发。
+        """
+        session_id = session_id or uuid.uuid4().hex[:8]
         now = datetime.now().isoformat()
         with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
             conn.execute(
-                "INSERT INTO sessions (id, created_at, jify_name, model) "
+                "INSERT OR IGNORE INTO sessions (id, created_at, jify_name, model) "
                 "VALUES (?, ?, ?, ?)",
                 (session_id, now, jify_name, model),
             )
@@ -138,6 +143,13 @@ class ConversationDB:
                 "UPDATE sessions SET ended_at = ? WHERE id = ?",
                 (now, session_id),
             )
+            conn.commit()
+
+    def delete_session(self, session_id: str) -> None:
+        """删除会话及其全部消息（gateway 删除会话时调用）"""
+        with closing(sqlite3.connect(self.db_path, timeout=10.0)) as conn, conn:
+            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             conn.commit()
 
 
