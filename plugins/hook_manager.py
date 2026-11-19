@@ -83,7 +83,12 @@ class HookManager:
         """
         for func in self._hooks.get(hook_point, []):
             try:
-                context = func(context)
+                new_ctx = func(context)
+                # hook 允许原地修改 context 后不 return（最常见写法）。
+                # 只有返回 dict 时才视为变更：就地合并，保留未被覆盖的键，
+                # 避免某个 hook 只返回 {"block": True} 就让后续 hook 丢失 tool_name 等字段。
+                if isinstance(new_ctx, dict):
+                    context.update(new_ctx)
             except Exception as e:
                 event_bus.put(UIEvent(
                     "ERROR",

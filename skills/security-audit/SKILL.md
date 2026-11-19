@@ -117,6 +117,24 @@ license: MIT
 ### 7. 经验沉淀（审计收尾必须执行）
 把**经过确认可行的思路与经验**结构化沉淀进经验库，供下次审计同类项目复用。调用 `skill_experience_add(skill_name="security-audit", ...)`，逐条添加。
 
+**判据只有一条：把这条内容给一个完全不知道该项目的审计者，他能否照着用。**
+
+| | 方法论（该写） | 流水账（不该写） |
+|---|---|---|
+| 内容 | 看到什么源码信号 → 提什么假设 → 用什么判据确认或推翻 → 什么条件下不成立 | 本次改了什么、跑了什么命令、用了哪个产品哪个版本 |
+| 产品名 | 不出现在 `title`/`steps`/`pitfalls` | 标题里带产品名和内部协议字段 |
+| 版本号 | 不出现 | 「Tomcat 8.5」「Spring Boot 2.1」混进判定逻辑 |
+| `pitfalls` | 必须写「什么条件下不成立」 | 只写正面描述，无法被证伪 |
+
+判定示范：
+
+- 流水账 →「VSCode 风格 RPC ChannelServer 驱动法：13B 分帧 + VQL serialize + dispatcher apply(args)」
+- 方法论 →「私有 RPC 无现成客户端时：从产物还原分帧格式，用最小请求探测 dispatcher 参数语义」
+
+产品名、版本号、项目名、内部协议常量应放在 `applies_when`（作识别信号）或 `cases`（作佐证），不占方法论三要素。
+
+产品内部细节确实有必要保留时，抽象成机制描述：「定长帧头 + 自定义 tag 编码」而非「13B 分帧 + VQL」。
+
 **落盘门槛（必须满足至少一条，否则一律不落盘）：**
 - 漏洞已经 `vuln_verify` 黑盒实测，返回 confirmed 证据（回显 / 时序 / 回连 / 状态码差异）
 - 用户已明确确认该漏洞正确（如「对」「确认」「是的」）
@@ -126,12 +144,28 @@ license: MIT
 - `vuln_verify` 返回 not confirmed / 误报
 - 用户否定或未表态
 
-字段填法：
-- **confirmed 漏洞** → `vuln_type` 填漏洞类型（sqli/rce/ssrf/...），`source_pattern` 写源码特征根因（如「f-string 直接拼接 SQL，参数来自用户输入」），`payload` 写验证载荷，`evidence` 写验证证据（响应差异/时序/回连），`approach` 写本次挖洞思路/定位方法，`framework_hint` 写框架栈提示
-- **高发攻击面**（未必有具体洞）→ `vuln_type="attack_surface"`，`source_pattern` 写攻击面特征
-- **绕过技巧 / 探测手法** → `vuln_type="bypass_technique"`，`approach` 或 `note` 写具体手法
+字段填法（参数名必须与下表一致，多写或写错会直接报错）：
 
-思路（`approach`）与经验同门槛，一起落盘。去重由工具按 `vuln_type + source_pattern` 自动完成，重复条目不重复写。
+| 参数 | 必填 | 填什么 |
+|---|---|---|
+| `skill_name` | 是 | 固定 `security-audit` |
+| `title` | 是 | 一句话讲清「查什么 / 怎么判」，如「任意文件上传：后缀可控 / 落点可执行 / 访问可达 三级定级」。由它生成方法 id，措辞要稳定，改字即新建一条 |
+| `category` | 否 | 漏洞类型，只能取：`rce` `sqli` `xss` `ssrf` `path_traversal` `deserialization` `csrf` `idor` `auth_bypass` `info_disclosure` `attack_surface` `bypass_technique` `other` |
+| `applies_when` | 否 | 何时适用：触发这条方法的源码特征 / 接口形态，写明具体符号名（如 `MultipartFile`、`StorageService.generateKey`），下次才能凭扫到的代码认出它 |
+| `steps` | 否 | 检查步骤，字符串数组，按顺序列出可执行的判定动作 |
+| `pitfalls` | 否 | 反向边界 / 易误判：什么情况下不成立、容易判错的地方。这条最防误报，尽量写 |
+| `project` | 否 | 个案佐证：项目名 / 框架栈 |
+| `payload` | 否 | 个案佐证：验证载荷 |
+| `evidence` | 否 | 个案佐证：验证证据（回显 / 时序 / 回连 / 状态码差异） |
+| `overwrite` | 否 | 默认 `false`。仅在**修正已存在的同名方法**时传 `true`，用本次的 `steps`/`pitfalls`/`applies_when`/`category` 替换旧值，旧值存入 `superseded` |
+
+写法的核心：**`title` `applies_when` `steps` `pitfalls` 是方法本身，要脱离本项目也能用；`project` `payload` `evidence` 是佐证，只用来支撑这条方法可信。**
+
+去重与更新：
+- 按 `title` 生成的 id 判重，同 id 不会重复建档
+- 默认只补空字段 + 追加佐证，**不覆盖已有内容**
+- 发现旧内容不准确（如「某条 pitfalls 其实只对某个版本成立」）要修正时，传 `overwrite=true` 重写
+- `overwrite=true` 会把被替换的旧值存进 `superseded`，误覆盖可查回复原
 
 ## 工具使用顺序
 

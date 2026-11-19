@@ -117,11 +117,24 @@ class PluginLoader:
             # event_bus.put(UIEvent("TEXT", f"[ Plugin ] ✓ loaded '{name}' v{manifest['version']}"))
             return True
         else:
-            self.failed[name] = "no loadable modules found"
+            # 保留子加载器写入的具体错误（如 tools.py 内部 ImportError），
+            # 只有确实无从判断时才用兜底文案
+            self.failed.setdefault(name, "no loadable modules found")
             return False
 
     def _load_tool_plugin(self, plugin_path: Path, name: str) -> bool:
         """加载 tool 类型插件：import tools.py 或 __init__.py 触发 @register_tool"""
+
+        # 只尝试真实存在的入口文件。否则 import 插件目录会命中 namespace package
+        # 而「成功」，把 tools.py 内部的依赖错误掩盖成加载成功。
+        entry_modules = []
+        if (plugin_path / "tools.py").is_file():
+            entry_modules.append(f"{plugin_path.name}.tools")
+        if (plugin_path / "__init__.py").is_file():
+            entry_modules.append(plugin_path.name)
+        if not entry_modules:
+            self.failed[name] = f"neither tools.py nor __init__.py found in {plugin_path}"
+            return False
 
         # 判断插件目录是否在 Jify 项目内
         try:
@@ -129,34 +142,23 @@ class PluginLoader:
             # 项目内插件：使用标准包路径 plugins.<name>.tools
             rel = self.plugins_dir.relative_to(self._project_root)
             prefix = ".".join(rel.parts)  # e.g. "plugins"
-            module_paths = [
-                f"{prefix}.{plugin_path.name}.tools",
-                f"{prefix}.{plugin_path.name}",
-            ]
+            module_paths = [f"{prefix}.{m}" for m in entry_modules]
         except ValueError:
             # 外部目录：把插件目录加入 sys.path，平级 import
             parent = str(self.plugins_dir)
             if parent not in sys.path:
                 sys.path.insert(0, parent)
-            module_paths = [
-                f"{plugin_path.name}.tools",
-                f"{plugin_path.name}",
-            ]
+            module_paths = entry_modules
 
         for module_path in module_paths:
             try:
                 importlib.import_module(module_path)
                 return True
-            except ImportError:
-                continue
             except Exception as e:
+                # 入口文件已确认存在，此处任何异常都是插件自身问题，必须如实上报
                 self.failed[name] = f"error importing {module_path}: {e}"
                 event_bus.put(UIEvent("ERROR", f"[ Plugin ] {name}: {self.failed[name]}\n{traceback.format_exc()}"))
                 return False
-
-        # 两个路径都找不到
-        self.failed[name] = f"neither tools.py nor __init__.py found in {plugin_path}"
-        return False
 
     def _load_hook_plugin(self, plugin_path: Path, name: str) -> bool:
         """加载 hook 类型插件：import hooks.py → 自动注册 hook 函数
@@ -164,6 +166,11 @@ class PluginLoader:
         hooks.py 中定义与 hook 点同名的函数（如 before_api_call, after_tool_call 等），
         HookManager 会自动扫描并注册。
         """
+
+        if not (plugin_path / "hooks.py").is_file():
+            self.failed[name] = f"hooks.py not found in {plugin_path}"
+            event_bus.put(UIEvent("ERROR", f"[ Plugin ] {name}: {self.failed[name]}"))
+            return False
 
         # 判断插件目录是否在 Jify 项目内
         try:
@@ -181,11 +188,8 @@ class PluginLoader:
 
         try:
             module = importlib.import_module(module_path)
-        except ImportError:
-            self.failed[name] = f"hooks.py not found in {plugin_path}"
-            event_bus.put(UIEvent("ERROR", f"[ Plugin ] {name}: {self.failed[name]}"))
-            return False
         except Exception as e:
+            # hooks.py 已确认存在，此处异常来自插件自身（含其内部 import 失败），如实上报
             self.failed[name] = f"error importing {module_path}: {e}"
             event_bus.put(UIEvent("ERROR", f"[ Plugin ] {name}: {self.failed[name]}\n{traceback.format_exc()}"))
             return False

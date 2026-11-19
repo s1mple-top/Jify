@@ -31,8 +31,10 @@
 说明：这是「漏洞挖掘方法论」；「踩坑经验」另存于 ~/.jify/self_evolution/experiences.json。
 """
 
+import fcntl
 import json
 import re
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -90,6 +92,26 @@ def _read_db() -> dict:
 def _write_db(db: dict) -> None:
     VUL_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     VUL_DB_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+@contextmanager
+def _db_lock():
+    """跨进程排他锁，覆盖「读 → 改 → 写」全过程。
+
+    不可重入：flock 对同进程的不同 fd 同样互斥，锁内再次取锁会死锁。
+    新增调用点必须在 _db_lock 之外，或先确认不在已持锁的路径上。
+
+    锁独立文件而非 vul.json 本身：写入方若改用 os.replace 换 inode，
+    锁在原 inode 上的句柄会失效，两边形不成互斥。
+    """
+    VUL_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = VUL_DB_PATH.with_suffix(VUL_DB_PATH.suffix + ".lock")
+    with open(lock_path, "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lk, fcntl.LOCK_UN)
 
 
 def _legacy_experience_paths(skill_name: str) -> List[Path]:
@@ -181,53 +203,105 @@ def load_methods(skill_name: str) -> List[dict]:
     return methods
 
 
-def append_method(skill_name: str, method: dict, case: dict = None) -> dict:
+OVERWRITABLE_FIELDS = ("category", "applies_when", "pitfalls", "steps")
+"""overwrite=True 时允许被新值替换的字段。
+
+title 与 id 不在其中：id 由 title 生成，改 title 即等于新建一条方法。
+"""
+
+MAX_SUPERSEDED = 5
+
+
+def _record_superseded(existing: dict, key: str, old_value, overwritten_at: str) -> None:
+    """把被覆盖的旧值追加进 superseded 留痕（按字段分组，只保留最近若干条）。"""
+    bucket = existing.setdefault("superseded", {}).setdefault(key, [])
+    bucket.append({"value": old_value, "overwritten_at": overwritten_at})
+    if len(bucket) > MAX_SUPERSEDED:
+        del bucket[:-MAX_SUPERSEDED]
+
+
+def append_method(skill_name: str, method: dict, case: dict = None, overwrite: bool = False) -> dict:
     """新增或合并一个挖洞方法。
 
-    - 同 id 已存在：只补充空字段并合并 case，不新建
     - 不存在：按传入字段新建
+    - 同 id 已存在且 overwrite=False：只补充空字段并合并 case，不覆盖已有内容
+    - 同 id 已存在且 overwrite=True：用非空新值替换 OVERWRITABLE_FIELDS，旧值存入 superseded
 
     Returns:
-        {"success": bool, "added": bool, "merged": bool, "skipped_reason": str, "count": int, "id": str}
+        {"success": bool, "added": bool, "merged": bool, "updated": bool,
+         "updated_fields": [str], "skipped_reason": str, "count": int, "id": str}
     """
     title = str(method.get("title", "")).strip()
     if not title:
-        return {"success": False, "added": False, "merged": False,
-                "skipped_reason": "缺少 title：方法必须有标题", "count": 0, "id": ""}
+        return {"success": False, "added": False, "merged": False, "updated": False,
+                "updated_fields": [], "skipped_reason": "缺少 title：方法必须有标题",
+                "count": 0, "id": ""}
 
     method_id = _slugify(str(method.get("id") or title))
+    case = _normalize_case(case or {})
+    steps = [str(s).strip() for s in method.get("steps", []) if str(s).strip()]
+
+    with _db_lock():
+        return _append_method_locked(skill_name, method, case, steps, method_id, title, overwrite)
+
+
+def _append_method_locked(skill_name: str, method: dict, case: dict, steps: List[str],
+                          method_id: str, title: str, overwrite: bool) -> dict:
+    """在 _db_lock 保护下完成「读 → 改 → 写」，调用方必须已持锁。"""
     db = _read_db()
     section = db["skills"].get(skill_name)
     if not isinstance(section, dict) or not isinstance(section.get("methods"), list):
         section = {"version": SCHEMA_VERSION, "methods": []}
 
     existing = next((m for m in section["methods"] if m.get("id") == method_id), None)
-    case = _normalize_case(case or {})
 
     if existing is not None:
-        # 补齐空字段，不覆盖已有内容
         filled = False
+        updated_fields: List[str] = []
+        now = _now()
+
         for key in ("category", "applies_when", "pitfalls"):
             val = str(method.get(key, "")).strip()
-            if val and not existing.get(key):
+            if not val:
+                continue
+            old = existing.get(key)
+            if not old:
                 existing[key] = val
                 filled = True
-        steps = [s.strip() for s in method.get("steps", []) if str(s).strip()]
-        if steps and not existing.get("steps"):
-            existing["steps"] = steps
-            filled = True
+            elif overwrite and val != old:
+                _record_superseded(existing, key, old, now)
+                existing[key] = val
+                updated_fields.append(key)
+
+        if steps:
+            old_steps = existing.get("steps") or []
+            if not old_steps:
+                existing["steps"] = steps
+                filled = True
+            elif overwrite and steps != old_steps:
+                _record_superseded(existing, "steps", old_steps, now)
+                existing["steps"] = steps
+                updated_fields.append("steps")
+
         case_added = _merge_case(existing, case)
-        if filled or case_added:
-            existing["updated_at"] = _now()
+        changed = filled or case_added or bool(updated_fields)
+        if changed:
+            existing["updated_at"] = now
             db["skills"][skill_name] = section
             _write_db(db)
+
+        if not changed:
+            skipped = "方法已存在且无新增信息（如需替换已有内容请传 overwrite=true）"
+        else:
+            skipped = ""
+
         return {
-            "success": True, "added": False, "merged": filled or case_added,
-            "skipped_reason": "" if (filled or case_added) else "方法已存在且无新增信息",
+            "success": True, "added": False, "merged": changed,
+            "updated": bool(updated_fields), "updated_fields": updated_fields,
+            "skipped_reason": skipped,
             "count": len(section["methods"]), "id": method_id,
         }
 
-    steps = [str(s).strip() for s in method.get("steps", []) if str(s).strip()]
     new_method = {
         "id": method_id,
         "title": title,
@@ -243,7 +317,8 @@ def append_method(skill_name: str, method: dict, case: dict = None) -> dict:
     section["methods"].append(new_method)
     db["skills"][skill_name] = section
     _write_db(db)
-    return {"success": True, "added": True, "merged": False, "skipped_reason": "",
+    return {"success": True, "added": True, "merged": False, "updated": False,
+            "updated_fields": [], "skipped_reason": "",
             "count": len(section["methods"]), "id": method_id}
 
 
@@ -289,7 +364,11 @@ def render_for_prompt(skill_name: str, max_methods: int = MAX_METHODS) -> str:
         "向某个 skill 的挖洞方法库沉淀一条「方法论」（不是个案记录）。"
         "把本次确认有效的挖洞思路抽象成可平移的方法：何时适用、检查步骤、反向边界/易误判，"
         "个案（project/payload/evidence）只作为佐证挂到 cases 上。"
-        "同 id 的方法已存在时只补充空字段并追加 case，不会重复建档。"
+        "判据：把内容给一个完全不知道该项目的审计者也能照着用。"
+        "title/steps/pitfalls 不写产品名、版本号、项目名、内部协议常量——这些放 applies_when 作识别信号或 cases 作佐证。"
+        "pitfalls 必须写「什么条件下不成立」，只有正面描述的方法无法被证伪，等于永远正确也永远无用。"
+        "同 id 的方法已存在时默认只补充空字段并追加 case，不覆盖已有内容；"
+        "若要修正已有方法的 steps/pitfalls/applies_when/category，传 overwrite=true（旧值会存入 superseded 留痕）。"
         "下次 load_skill 时方法库会随 SKILL.md 一起加载进上下文。"
         "重要：仅当漏洞经 vuln_verify 黑盒实测确认为 confirmed，或用户已明确确认该漏洞正确时，"
         "才可调用本工具落盘；仅静态线索、not confirmed、误报、用户否定或未表态的，一律不要落盘。"
@@ -299,7 +378,7 @@ def render_for_prompt(skill_name: str, max_methods: int = MAX_METHODS) -> str:
         "properties": {
             "skill_name": {"type": "string", "description": "目标 skill 名称（如 security-audit）"},
             "title": {"type": "string", "description": "方法标题，一句话讲清「查什么/怎么判」，会据此生成稳定 id"},
-            "category": {"type": "string", "description": "方法类别（如 file_upload、authz、ssrf、info_disclosure，可空）"},
+            "category": {"type": "string", "description": "方法类别，取值：rce/sqli/xss/ssrf/path_traversal/deserialization/csrf/idor/auth_bypass/info_disclosure/attack_surface/bypass_technique/other（可空）"},
             "applies_when": {"type": "string", "description": "何时适用：触发这条方法的源码特征/接口形态（可空）"},
             "steps": {
                 "type": "array",
@@ -310,6 +389,10 @@ def render_for_prompt(skill_name: str, max_methods: int = MAX_METHODS) -> str:
             "project": {"type": "string", "description": "个案：项目/技术栈（可空，仅作佐证）"},
             "payload": {"type": "string", "description": "个案：验证 Payload（可空）"},
             "evidence": {"type": "string", "description": "个案：验证证据（可空）"},
+            "overwrite": {
+                "type": "boolean",
+                "description": "仅在修正已存在的同名方法时使用：为 true 时用本次传入的非空 steps/pitfalls/applies_when/category 替换旧值，旧值存入 superseded。默认 false 只补空字段",
+            },
         },
         "required": ["skill_name", "title"],
     },
@@ -326,6 +409,7 @@ def skill_experience_add(
     project: str = "",
     payload: str = "",
     evidence: str = "",
+    overwrite: bool = False,
 ) -> str:
     """沉淀一个挖洞方法（可附带一条个案佐证）到 skill 方法库。"""
     event_bus.put(UIEvent("TEXT", f"* skill_experience_add ( {skill_name} )"))
@@ -351,6 +435,7 @@ def skill_experience_add(
             "pitfalls": pitfalls,
         },
         {"project": project, "payload": payload, "evidence": evidence},
+        overwrite=overwrite,
     )
 
     if not result["success"]:
@@ -358,6 +443,8 @@ def skill_experience_add(
 
     if result["added"]:
         msg = f"已新建方法 '{result['id']}'（该 skill 当前 {result['count']} 个方法）"
+    elif result.get("updated"):
+        msg = f"已覆盖更新方法 '{result['id']}' 的 {', '.join(result['updated_fields'])}（旧值已存入 superseded）"
     elif result["merged"]:
         msg = f"已合并进已有方法 '{result['id']}'（该 skill 当前 {result['count']} 个方法）"
     else:
@@ -367,6 +454,8 @@ def skill_experience_add(
         "success": True,
         "added": result["added"],
         "merged": result["merged"],
+        "updated": result.get("updated", False),
+        "updated_fields": result.get("updated_fields", []),
         "message": msg,
         "method_id": result["id"],
         "count": result["count"],
