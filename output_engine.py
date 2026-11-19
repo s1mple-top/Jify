@@ -65,6 +65,12 @@ _EMOJI_RE = re.compile(
 )
 
 
+# 降级句子的句末标点判定。命中则不再补句号，避免出现「内容..」。
+# 除半角 .!? 与省略号外也认中文的 。！？——中文内容很少以半角句号收尾，
+# 只判半角会让每条中文段落都被追加一个英文句点。
+_SENTENCE_END_RE = re.compile(r'[.!?。！？\u2026]["\')\]]*$')
+
+
 def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub('', text)
 
@@ -108,6 +114,24 @@ def _max_unbreakable_width(cells) -> int:
             for seg in re.split(r"[^\x00-\x7f]+", token):
                 best = max(best, len(seg))
     return best
+
+
+# 工具执行期的进度帧：由细到粗的一组星形符号，逐帧推进到末帧后按原路回退，
+# 首尾不重复，形成 12 帧的往返序列。单帧停留 120ms，比原先按秒翻转的方波
+# 更连贯，视觉上是「呼吸」而不是「开关」。
+_EXEC_FRAMES = ("·", "✢", "✳", "✶", "✻", "✽")
+_EXEC_YOYO = _EXEC_FRAMES + tuple(reversed(_EXEC_FRAMES))
+_EXEC_FRAME_SEC = 0.12
+
+
+def _exec_frame() -> str:
+    """取当前时刻对应的执行帧，前后补空格凑满 3 cells。
+
+    所有帧字符的半角宽度均为 1，补齐后与任意帧宽度一致，
+    状态行整行宽度恒定，不会因换帧触发折行。
+    """
+    idx = int(time.monotonic() / _EXEC_FRAME_SEC) % len(_EXEC_YOYO)
+    return f" {_EXEC_YOYO[idx]} "
 
 
 # 全局终端模式锁：保护所有 tcgetattr/tcsetattr 操作。
@@ -421,11 +445,27 @@ class OutputEngine:
             t.append(phrase, style=f"italic {JifyTheme.SUBTLE}")
         t.append(f"  ({self.fmt_elapsed(elapsed)}", style=JifyTheme.SUBTLE)
 
+        # 工具执行期（executing）：首个 token 计数前的 "·" 换成往复推进的星形帧。
+        # 每个帧字符都是 1 cell，前后各补一个空格后恒为 3 cells，整行宽度不随
+        # 换帧变化，不会触发折行。执行结束 phase 切回 idle，前缀恢复 " · "。
+        _exec_running = model_phase == "executing" and (sent > 0 or recv > 0)
+        _exec_glyph = _exec_frame() if _exec_running else " · "
+
         # 早期设计缺陷，暂时预估 token, subagent 的 token 消耗也暂时预估
         if sent > 0:
-            t.append(f" · ↑ {self.fmt_tokens(sent // 2)} tokens", style=JifyTheme.YELLOW)
+            if _exec_running:
+                t.append(_exec_glyph, style=JifyTheme.SUBTLE)
+            else:
+                t.append(" · ", style=JifyTheme.SUBTLE)
+            _exec_running = False  # 只替换第一个箭头前的点
+            t.append(f"↑ {self.fmt_tokens(sent // 2)} tokens", style=JifyTheme.YELLOW)
         if recv > 0:
-            t.append(f" · ↓ {self.fmt_tokens(recv // 2)} tokens", style=JifyTheme.GREEN)
+            if _exec_running:
+                t.append(_exec_glyph, style=JifyTheme.SUBTLE)
+            else:
+                t.append(" · ", style=JifyTheme.SUBTLE)
+            _exec_running = False
+            t.append(f"↓ {self.fmt_tokens(recv // 2)} tokens", style=JifyTheme.GREEN)
         t.append(" · ctrl+c to interrupt", style=JifyTheme.SUBTLE)
 
         phase_text = {
@@ -1126,13 +1166,16 @@ class OutputEngine:
                     val = row[j].strip()
                     if not val:
                         continue
+                    # 段间用空格而非竖线：降级后是散文式短句，竖线在连续文字里
+                    # 只是噪音；句子之间再补句号收尾，读起来是完整的一句话。
                     if parts:
-                        line.append(" | ")
+                        line.append(" ")
                     # 表头为空（如首列留空的对照表）时不输出 ": value" 这种畸形前缀
                     head = header_cells[j].strip() if j < len(header_cells) else ''
-                    if head:
-                        line.append(f"{head}: ")
-                    line.append_text(self._markdown_cell_to_text(val))
+                    seg = f"{head}: {val}" if head else val
+                    if not _SENTENCE_END_RE.search(seg):
+                        seg += "."
+                    line.append_text(self._markdown_cell_to_text(seg))
                     parts += 1
                 if parts:
                     fallback.append(line)

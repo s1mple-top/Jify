@@ -1256,12 +1256,16 @@ class AgentLoop:
                 enhanced.append((idx, tcall))
 
         if enhanced:
-            # 剩余工具按策略执行
-            pending = [tc for _, tc in enhanced]
-            if should_parallel(pending):
-                done = self._execute_parallel(pending)
-            else:
-                done = self._execute_sequential(pending)
+            # 剩余工具按策略执行（状态栏据此把首个 token 前的 "·" 换成往复推进的星形帧）
+            self._set_phase("executing")
+            try:
+                pending = [tc for _, tc in enhanced]
+                if should_parallel(pending):
+                    done = self._execute_parallel(pending)
+                else:
+                    done = self._execute_sequential(pending)
+            finally:
+                self._set_phase("idle")
             for (idx, _), tc_result in zip(enhanced, done):
                 slots[idx] = tc_result
                 produced.add(idx)
