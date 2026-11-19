@@ -171,6 +171,30 @@ def _merge_case(method: dict, case: dict) -> bool:
     return True
 
 
+def _normalize_method(m: dict) -> dict:
+    """把方法记录的字段类型归一化，避免单条脏记录让整个 skill 加载失败。
+
+    库文件是明文 JSON，可能被手改或由旧版本写入异常类型。
+    render_for_prompt 与排序都假设字段类型正确，这里兜住。
+    """
+    if not isinstance(m.get("steps"), list):
+        m["steps"] = []
+    m["steps"] = [str(s) for s in m["steps"] if s is not None and str(s).strip()]
+
+    cases = m.get("cases")
+    if not isinstance(cases, list):
+        cases = []
+    m["cases"] = [c for c in cases if isinstance(c, dict)]
+
+    if not isinstance(m.get("confidence"), int) or isinstance(m.get("confidence"), bool):
+        m["confidence"] = len(m["cases"])
+
+    for key in ("title", "category", "applies_when", "pitfalls", "updated_at"):
+        if not isinstance(m.get(key), str):
+            m[key] = ""
+    return m
+
+
 def load_methods(skill_name: str) -> List[dict]:
     """读取某 skill 的方法列表（按置信度降序）。当前库 + 旧版遗留文件合并。"""
     section = _read_db()["skills"].get(skill_name)
@@ -199,6 +223,7 @@ def load_methods(skill_name: str) -> List[dict]:
             seen.add(m["id"])
             methods.append(m)
 
+    methods = [_normalize_method(m) for m in methods]
     methods.sort(key=lambda m: (m.get("confidence", 0), m.get("updated_at", "")), reverse=True)
     return methods
 
