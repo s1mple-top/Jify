@@ -1368,7 +1368,7 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False,
                 agent_cli.interrupt()
                 console.print()
                 meta("  [已中断]")
-                console.print()
+                divider()
                 continue
             divider()
 
