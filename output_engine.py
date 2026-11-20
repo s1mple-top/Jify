@@ -4,6 +4,7 @@ Jify Output Engine — 终端渲染、状态行、动画线程、输出缓冲。
 """
 
 import json
+import io
 import math
 import random
 import re
@@ -134,6 +135,30 @@ def _exec_frame() -> str:
     return f" {_EXEC_YOYO[idx]} "
 
 
+# subagent 轨道：状态栏右緣单独一列，每个在跑的 subagent 占一行。状态栏与输入态
+# （prompt_toolkit）共用同一套帧与配色，两处显示的节奏完全一致。
+_SA_DOT = "●"
+_SA_DOT_STYLE = "#f5d6a8"
+_SA_BLINK_HALF = 1.0                         # 亮/灭各持续秒数，整体是 2s 方波
+_SA_LABEL_MAX = len("subagent") + 2          # subagent + 两位序号
+_SA_HEAD_W = 1 + 1 + _SA_LABEL_MAX           # 点 + 空格 + 标签
+SA_RAIL_W = 2 + _SA_HEAD_W                   # │ + 空格 + 头部（最窄轨道）
+_SA_RAIL_MIN_LINES = 3                       # 轨道最低视觉高度：只有 1 个实例且无 todos 时
+                                             # 块高仅 1 行，竖线只剩一个字符；撑到 3 行更完整。
+                                             # 只是下限，todos/实例变多时块高继续跟着涨
+_SA_DESC_MIN = 12                            # 任务片段最小可用宽度，低于则不再展示片段
+_SA_DESC_MAX = 30                            # 任务片段宽度上限
+
+
+def sa_frame() -> str:
+    """取当前时刻的指示点：亮/灭方波（有无有无），不做明暗渐变。
+
+    亮帧 ``"● "``、灭帧 ``"  "`` 均为 2 cells，换帧不改变行宽。
+    """
+    on = int(time.monotonic() / _SA_BLINK_HALF) % 2 == 0
+    return _SA_DOT + " " if on else "  "
+
+
 # 全局终端模式锁：保护所有 tcgetattr/tcsetattr 操作。
 # 审批流程(approval)与 prompt_toolkit、动画线程都可能切换终端模式，
 # 统一用这把锁串行化，防止并发切换导致 termios 状态错乱（输入失效）。
@@ -261,15 +286,13 @@ class OutputEngine:
         self._anim_recv: int = 0
         self._anim_recv_target: int = 0
 
-        # subagent token 动画：按实例 key 各存一组 (cur_sent, target_sent, cur_recv, target_recv)
-        self._anim_sa: Dict[str, Dict[str, int]] = {}
+        # subagent 只保留序号：右侧轨道每行一个「● subagentN」，其余信息不展示
+        self._subagents: Dict[str, int] = {}
 
         self._model_phase: str = "idle"
         self._workflow_status: Optional[Dict] = None
         self._team_workers: Dict[str, Dict] = {}
         self._todos: Optional[list] = None
-        # 并发 subagent 可能同时运行，按 key（线程 ident）分槽位，避免互相覆盖
-        self._subagents: Dict[str, Dict] = {}
 
         self._tip_index: int = 0
         self._tip_last_tick: float = 0.0
@@ -322,29 +345,42 @@ class OutputEngine:
         with self._anim_lock:
             self._team_workers.pop(worker_id, None)
 
-    def set_subagent(self, key: str, info: Dict) -> None:
-        """状态栏里更新某个 subagent 的实时状态（key 用线程 ident 区分并发实例）"""
+    def set_subagent(self, key: str, task: str = "") -> None:
+        """登记一个正在跑的 subagent（key 用线程 ident 区分并发实例）。
+
+        序号取当前最小的空闲槽位，同一时刻在跑的实例显示为连续的
+        subagent1 / subagent2 …，finish 后槽位回收给下一个复用。
+        task 为该实例的任务片段，供轨道第二档展示；已登记过的实例重复调用
+        只更新片段，不重排序号（序号随生命周期稳定）。
+        """
+        snippet = " ".join(task.split())[:80]
         with self._anim_lock:
-            self._subagents[key] = info
-            # 同步更新该实例的 token 动画目标值
-            anim = self._anim_sa.get(key)
-            if anim is None:
-                anim = {"cur_sent": 0, "target_sent": 0, "cur_recv": 0, "target_recv": 0}
-                self._anim_sa[key] = anim
-            if "sent_est" in info:
-                anim["target_sent"] = info["sent_est"]
-            if "recv_est" in info:
-                anim["target_recv"] = info["recv_est"]
+            if key in self._subagents:
+                self._subagents[key]["task"] = snippet
+                return
+            used = {v["seq"] for v in self._subagents.values()}
+            seq = 1
+            while seq in used:
+                seq += 1
+            self._subagents[key] = {"seq": seq, "task": snippet, "last_tool": "", "tools": 0}
+
+    def update_subagent(self, key: str, last_tool: str = "") -> None:
+        """更新某个 subagent 的最近一次工具活动（轨道第二档的次级行）。"""
+        with self._anim_lock:
+            info = self._subagents.get(key)
+            if info is None:
+                return
+            info["tools"] += 1
+            if last_tool:
+                info["last_tool"] = last_tool
 
     def clear_subagent(self, key: Optional[str] = None) -> None:
         """清理 subagent 槽位：传 key 只清该实例，不传则清全部"""
         with self._anim_lock:
             if key is None:
                 self._subagents.clear()
-                self._anim_sa.clear()
             else:
                 self._subagents.pop(key, None)
-                self._anim_sa.pop(key, None)
 
     def set_todos(self, todos: list) -> None:
         """更新 todos 列表，由动画线程下一帧渲染到状态栏。"""
@@ -423,7 +459,7 @@ class OutputEngine:
                     workflow_status: Optional[Dict] = None,
                     team_workers: Optional[Dict] = None,
                     todos: Optional[list] = None,
-                    subagents: Optional[Dict[str, Dict]] = None,
+                    subagents: Optional[Dict[str, int]] = None,
                     tip: str = "") -> Any:
         t = Text("")
         # 状态栏所有行禁止折行：帧高必须只由条目数决定。超宽行一旦折行，
@@ -436,6 +472,13 @@ class OutputEngine:
         # 行数预算：帧高封顶在终端高度内（留 1 行余量，块高恰好 == 终端高时
         # 光标落在末行，边界上仍可能触发一次滚动）
         _max_lines = max(6, self.console.height - 1)
+        # subagent 轨道占右侧一列（分隔线 + 点 + 标签，宽裕时再带任务片段）。
+        # 轨道与左侧并排、不占左侧行预算。宽度按最窄轨道保守扣除，给左侧
+        # 正文和 team 表先留足空间；片段宽度在 compose_rail 里按左侧实际
+        # 渲染宽度二次分配，避免把状态行挤到截断。
+        _rail_items = []
+        if subagents:
+            _rail_items = sorted(subagents.items(), key=lambda kv: (kv[1].get("seq", 0), str(kv[0])))
         _wf_lines = 0
 
         t.append("✦ ", style=f"italic {JifyTheme.SUBTLE}")
@@ -501,7 +544,6 @@ class OutputEngine:
         # team 表固定开销 = 空行 + 标题 + 统计 + think + token + 表尾 = 6 行，
         # 不含活动流行；活动流条数按剩余高度动态收缩（原先固定 10 条，小窗口
         # 会顶穿终端高度 → Live 光标上移越界 → 整屏滚动爆闪）。
-        _n_sa = len(subagents) if subagents else 0
         _n_todo = len(todos) if todos else 0
         _team_fixed = 6 if team_workers else 0
         _tip_lines = 3 if tip else 0          # tips 正文 1 行 + 前后空行 2 行
@@ -509,7 +551,7 @@ class OutputEngine:
         if team_workers:
             # subagent / todos 每条占 1 行，先给它们留位，剩余才给活动流；
             # 至少留 1 条（worker 在跑就必须能看到它最后干了什么）
-            _stream_room = _remaining - _n_sa - _n_todo
+            _stream_room = _remaining - _n_todo
             _MAX_STREAM_LINES = max(1, min(_MAX_STREAM_LINES, _stream_room))
             _remaining -= _MAX_STREAM_LINES
 
@@ -616,84 +658,11 @@ class OutputEngine:
                 team_table.add_column(overflow="ellipsis", no_wrap=True)
             team_table.add_row(*cells)
 
-        # 行数预算：subagent 优先占用剩余预算（实时活动主体），todos 存在时
-        # 保底留 1 行；subagent 超出部分折叠成 1 行摘要，todos 超出截掉低优先级尾部。
-        if _n_sa + _n_todo > _remaining:
-            _sa_slot = _remaining - 1 if _n_todo else _remaining
-            _sa_visible = min(_n_sa, max(0, _sa_slot))
-            if _n_sa > _sa_visible:
-                # 折叠摘要行本身占 1 行
-                _sa_visible = max(0, _sa_slot - 1)
-            _todo_visible = min(
-                _n_todo,
-                max(0, _remaining - _sa_visible - (1 if _n_sa > _sa_visible else 0)),
-            )
-        else:
-            _sa_visible = _n_sa
-            _todo_visible = _n_todo
-
-        if subagents:
-            now_sa = time.time()
-            # 按启动时间排序，先起的排前面
-            ordered = sorted(
-                subagents.items(),
-                key=lambda kv: (kv[1].get("_start") or 0, str(kv[0])),
-            )
-            for idx, (key, sa) in enumerate(ordered[:_sa_visible]):
-                task = sa.get("task", "")
-                # 同 team worker：多行任务描述会强制断行，先折叠空白
-                task = " ".join(task.split())
-                _start = sa.get("_start")
-                if _start is not None:
-                    sa_elapsed = now_sa - _start
-                else:
-                    sa_elapsed = sa.get("elapsed", 0)
-                tool_uses = sa.get("tool_uses", 0)
-                status = sa.get("status", "running")
-                sent_est = sa.get("sent_est", 0)
-                recv_est = sa.get("recv_est", 0)
-                symbol = {"pending": "○", "running": "⏳", "completed": "✓", "failed": "✗"}.get(status, "⏳")
-                seq = sa.get("seq", idx + 1)
-                token_info = ""
-                if sent_est:
-                    # 初期的架构设计缺陷，暂时使用预估token计数
-                    token_info += f" · ↑ {self.fmt_tokens(sent_est // 2)} tokens"
-                if recv_est:
-                    token_info += f" · ↓ {self.fmt_tokens(recv_est // 2)} tokens"
-                # 行整体是 no_wrap+crop，超宽会从行尾裁掉统计信息，因此先拼
-                # 后缀量出宽度，再用剩余宽度按「显示宽度」截 task（中文占 2 列），
-                # 保证时长/工具数/token 统计不被裁。80 列窄终端下 head+tail
-                # 本身可能就占满整行，此时逐级降级：先丢 token 统计再丢工具数。
-                _head = f'  🤖 subagent#{seq}(task="'
-                _seg = f"{symbol} {self.fmt_elapsed(sa_elapsed)}"
-                if tool_uses:
-                    _seg += f" · {tool_uses} tools"
-                if token_info:
-                    _seg += token_info
-                _task_avail = self.console.width - cell_len(_head) - cell_len(f'")  ({_seg})')
-                if _task_avail < 8 and token_info:
-                    _seg = f"{symbol} {self.fmt_elapsed(sa_elapsed)}"
-                    if tool_uses:
-                        _seg += f" · {tool_uses} tools"
-                    _task_avail = self.console.width - cell_len(_head) - cell_len(f'")  ({_seg})')
-                if _task_avail < 6 and tool_uses:
-                    _seg = f"{symbol} {self.fmt_elapsed(sa_elapsed)}"
-                    _task_avail = self.console.width - cell_len(_head) - cell_len(f'")  ({_seg})')
-                _tail = f'")  ({_seg})'
-                if cell_len(task) > _task_avail:
-                    kept, used = [], 0
-                    for ch in task:
-                        cw = cell_len(ch)
-                        if used + cw > _task_avail - 1:
-                            break
-                        used += cw
-                        kept.append(ch)
-                    task = "".join(kept) + "…" if _task_avail >= 1 else ""
-                t.append("\n")
-                t.append(f"{_head}{task}{_tail}", style=JifyTheme.SUBTLE)
-            if _n_sa > _sa_visible:
-                t.append("\n")
-                t.append(f"  🤖 … +{_n_sa - _sa_visible} more", style=JifyTheme.SUBTLE)
+        # 行数预算：todos 超出则截掉低优先级尾部（subagent 在右侧轨道，不占左侧行）。
+        # 有 subagent 在跑时给它至少留 1 行：否则 todos 排满时轨道整个消失，
+        # 用户看不到「还有子任务在跑」这一事实。
+        _rail_room = 1 if _rail_items else 0
+        _todo_visible = min(_n_todo, max(0, _remaining - _rail_room))
 
         if todos:
             status_icon = {
@@ -725,9 +694,134 @@ class OutputEngine:
             t.append(f"\n")
             t.append(f"\n")
 
-        if team_table is not None:
-            return Group(t, team_table)
-        return t
+        left = Group(t, team_table) if team_table is not None else t
+        if not _rail_items:
+            return left
+        return self.compose_rail(left, _rail_items, self.console.width, _max_lines)
+
+    @staticmethod
+    def _sa_fit(text: str, width: int) -> str:
+        """按显示宽度截断（中文占 2 列），超宽补省略号。"""
+        if width <= 0:
+            return ""
+        if cell_len(text) <= width:
+            return text
+        kept, used = [], 0
+        for ch in text:
+            cw = cell_len(ch)
+            if used + cw > width - 1:
+                break
+            used += cw
+            kept.append(ch)
+        return "".join(kept) + "…"
+
+    @classmethod
+    def compose_rail(cls, left, items: list, width: int, max_lines: int) -> Any:
+        """把左侧状态块与右侧 subagent 轨道拼成一行两列。
+
+        轨道按可用高度分三档降级（与左侧正文抢同一份行预算，故必须先算行数）：
+
+        - full    ：每实例 2 行，``● subagent1 任务片段`` + ``  ⎿ 最近工具``；
+                    还没调过工具的实例只有头部 1 行，不画空的工具行
+        - compact ：每实例 1 行，只剩 ``● subagent1 任务片段``
+        - minimal ：整体 1 行摘要，``● 3 agents running…``
+
+        左列宽度自适应，右列宽度按「终端宽度 - 左侧实际最长行」二次分配：
+        片段只在左侧确实用不到那么宽时才会占用，避免把状态行挤到截断。
+        两列之间用竖向分隔线连接，行数取两者较大值——轨道比左侧长时左列
+        补空行，反之右列补空行，保证每行都有分隔线，视觉上是一条竖线。
+
+        grid 的 vertical 对齐在 expand 模式下不生效，只能靠两侧行数相等来
+        对齐；行数需求要预渲染左块才能知道，硬算容易和实际渲染差一行。
+        """
+        # 量左侧实际行数（决定轨道能要几行）与自然宽度（硬约束用）
+        console = RichConsole(width=width, file=io.StringIO(), legacy_windows=False,
+                              color_system=None, force_terminal=False)
+        n_left = len(console.render_lines(left, console.options, pad=False))
+
+        wide = RichConsole(width=400, file=io.StringIO(), legacy_windows=False,
+                           color_system=None, force_terminal=False)
+        natural = wide.render_lines(left, wide.options, pad=False)
+        left_w = max((sum(seg.cell_length for seg in ln) for ln in natural), default=0)
+
+        # 轨道宽度是硬约束推导的：左侧自然宽度 + 最窄轨道必须放得下，
+        # 否则一出现 subagent 就把状态行尾巴裁掉（既有体验倒退）。
+        # 有余量时才给任务片段，且不超过实际最长片段。
+        spare = width - min(left_w, width) - SA_RAIL_W - 1
+        task_w = max((cell_len(v.get("task") or "") for _, v in items), default=0)
+        desc_w = min(task_w, _SA_DESC_MAX, spare) if spare >= _SA_DESC_MIN else 0
+        rail_w = SA_RAIL_W + (1 + desc_w if desc_w else 0)
+
+        # 行预算：左侧正文优先（它是主信息），轨道只能用剩余行数。
+        # full 档下只有调过工具的实例才占 2 行（头部 + 工具行），刚启动还没
+        # 调工具的只占 1 行，所以行数需求要逐实例统计，不能一律按 2*n 算。
+        room = max(0, max_lines - n_left)
+        n = len(items)
+        _full_lines = sum(2 if (v.get("last_tool") or "") else 1 for _, v in items)
+        if room >= _full_lines:
+            mode = "full"
+        elif room >= n:
+            mode = "compact"
+        elif room >= 1:
+            mode = "minimal"
+        else:
+            mode = "none"
+
+        rail = Text()
+        rail.no_wrap = True
+        rail.overflow = "crop"
+
+        def _head(i: int, info: Dict) -> None:
+            rail.append("│ ", style=JifyTheme.SUBTLE)
+            rail.append(sa_frame(), style=f"bold {_SA_DOT_STYLE}")
+            rail.append(f"subagent{info.get('seq', i + 1)}", style=JifyTheme.SUBTLE)
+
+        if mode == "full":
+            for i, (_, info) in enumerate(items):
+                if i:
+                    rail.append("\n")
+                _head(i, info)
+                task = info.get("task") or ""
+                if task and desc_w:
+                    rail.append(" " + cls._sa_fit(task, desc_w), style=JifyTheme.SUBTLE)
+                # 没有工具活动就不画工具行：刚启动的实例只留一行头部，
+                # 不出现空的 ⎿ 占位
+                last = info.get("last_tool") or ""
+                if not last:
+                    continue
+                rail.append("\n")
+                rail.append("│ " + "    ⎿ ", style=JifyTheme.SUBTLE)
+                rail.append(cls._sa_fit(last, rail_w - 8), style=JifyTheme.SUBTLE)
+        elif mode == "compact":
+            for i, (_, info) in enumerate(items):
+                if i:
+                    rail.append("\n")
+                _head(i, info)
+                task = info.get("task") or ""
+                if task and desc_w:
+                    rail.append(" " + cls._sa_fit(task, desc_w), style=JifyTheme.SUBTLE)
+        elif mode == "minimal":
+            # 最窄轨道只有 SA_RAIL_W，放不下长句；用 n×空格 的紧凑写法
+            rail.append("│ ", style=JifyTheme.SUBTLE)
+            rail.append(sa_frame(), style=f"bold {_SA_DOT_STYLE}")
+            rail.append(f"×{n}", style=JifyTheme.SUBTLE)
+        else:
+            return left
+
+        # 竖线要贯穿整个状态块：块高取三者最大——左侧实际行数、轨道自身行数、
+        # 轨道最小视觉高度。只有 1 个实例且没有 todos 时块高仅 1 行，竖线只剩
+        # 一个字符看着像悬空，撑到下限更稳；有 todos / 多实例时块高自然变高，
+        # 竖线跟着铺满。上限受帧高预算约束，不会顶穿终端。
+        rail_lines = rail.plain.count("\n") + 1
+        block_lines = max(n_left, rail_lines, min(_SA_RAIL_MIN_LINES, max_lines))
+        for _ in range(block_lines - rail_lines):
+            rail.append("\n│", style=JifyTheme.SUBTLE)
+
+        grid = RichTable.grid(padding=0, expand=True)
+        grid.add_column(ratio=1, no_wrap=True, overflow="crop")
+        grid.add_column(width=rail_w, no_wrap=True, overflow="crop")
+        grid.add_row(left, rail)
+        return grid
 
     # Lifecycle
     def start_round(self) -> None:
@@ -798,7 +892,6 @@ class OutputEngine:
         self._anim_target = 0
         self._anim_recv = 0
         self._anim_recv_target = 0
-        self._anim_sa.clear()
         self._workflow_status = None
         self._team_workers.clear()
         self._subagents.clear()
@@ -841,18 +934,6 @@ class OutputEngine:
                         step = max(1, int(gap * alpha + 0.5))
                         self._anim_recv = min(self._anim_recv + step, self._anim_recv_target)
 
-                    # subagent token 平滑动画，每个实例各自指数逼近
-                    for _sa_anim in self._anim_sa.values():
-                        alpha = 1.0 - math.exp(-dt / 0.2)
-                        if _sa_anim["cur_sent"] < _sa_anim["target_sent"]:
-                            gap = _sa_anim["target_sent"] - _sa_anim["cur_sent"]
-                            step = max(1, int(gap * alpha + 0.5))
-                            _sa_anim["cur_sent"] = min(_sa_anim["cur_sent"] + step, _sa_anim["target_sent"])
-                        if _sa_anim["cur_recv"] < _sa_anim["target_recv"]:
-                            gap = _sa_anim["target_recv"] - _sa_anim["cur_recv"]
-                            step = max(1, int(gap * alpha + 0.5))
-                            _sa_anim["cur_recv"] = min(_sa_anim["cur_recv"] + step, _sa_anim["target_recv"])
-
                     elapsed = time.time() - self._session_start_time
                     phrase = self._phrase
                     sent = self._anim_sent
@@ -862,11 +943,6 @@ class OutputEngine:
                     team_snapshot = dict(self._team_workers)
                     todos_snapshot = list(self._todos) if self._todos else None
                     subagent_snapshot = {k: dict(v) for k, v in self._subagents.items()}
-                    for _key, _snap in subagent_snapshot.items():
-                        _anim = self._anim_sa.get(_key)
-                        if _anim is not None:
-                            _snap["sent_est"] = _anim["cur_sent"]
-                            _snap["recv_est"] = _anim["cur_recv"]
 
                     tip_text = ""
                     now_tip = time.monotonic()

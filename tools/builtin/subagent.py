@@ -4,15 +4,13 @@
 from tools.registry import register_tool
 from subagent import SubagentRunner
 
-import itertools
+import json
 import os, sys as _sys
 import threading
 import time
 
 from rich.text import Text
 
-# 状态栏展示用的 subagent 自增编号（itertools.count 的 next 在多线程下安全）
-_SA_SEQ = itertools.count(1)
 
 # 白名单工具: 只给 subagent 这些工具
 SUBAGENT_WHITELIST = {
@@ -138,12 +136,10 @@ def subagent_run(task: str, max_iterations: int = 100) -> str:
     # 构建实时状态追踪回调
     import threading as _thr
 
-    task_snippet = task[:42] + "…" if len(task) > 42 else task
     start_time = time.time()
     tool_counter = [0]
-    # 并发实例用线程 ident 作槽位 key，seq 只用于状态栏展示编号
+    # 并发实例用线程 ident 作槽位 key，序号由状态栏按空闲槽位分配
     sa_key = f"sa-{_thr.get_ident()}"
-    sa_seq = next(_SA_SEQ)
 
     def _on_progress(event_type: str, data: dict) -> None:
         # 已被取消的实例不再回写状态栏：取消发生在两次检查点之间时，
@@ -152,35 +148,27 @@ def subagent_run(task: str, max_iterations: int = 100) -> str:
         from tools.call_context import is_cancelled
         if is_cancelled():
             return
-        from team import get_output_engine
-        engine = get_output_engine()
-        if not engine:
-            return
         if event_type == "tool_start":
             tool_counter[0] += 1
-        info = {
-            "seq": sa_seq,
-            "task": task_snippet,
-            "_start": start_time,
-            "tool_uses": tool_counter[0],
-            "status": "running",
-        }
-        if event_type == "token_update":
-            info["sent_est"] = data.get("sent", 0)
-            info["recv_est"] = data.get("recv", 0)
-        engine.set_subagent(sa_key, info)
+            # 轨道第二行展示最近一次工具活动，复用主转义的调用摘要格式
+            from output_engine import OutputEngine
+            name = data.get("name", "")
+            args = data.get("args", {})
+            try:
+                args_str = json.dumps(args, ensure_ascii=False)
+            except (TypeError, ValueError):
+                args_str = ""
+            name_line, _ = OutputEngine.format_tool_call(name, args_str)
+            from team import get_output_engine as _get_oe_inner
+            _eng = _get_oe_inner()
+            if _eng:
+                _eng.update_subagent(sa_key, name_line.lstrip("• ").strip())
 
-    # 立即在状态栏显示 subagent 运行中（不等工具回调）
+    # 立即登记到状态栏：右轨立即出现该实例（不等首个工具回调）
     from team import get_output_engine as _get_oe
     _oe = _get_oe()
     if _oe:
-        _oe.set_subagent(sa_key, {
-            "seq": sa_seq,
-            "task": task_snippet,
-            "_start": start_time,
-            "tool_uses": 0,
-            "status": "running",
-        })
+        _oe.set_subagent(sa_key, task)
 
     runner = SubagentRunner(model_client, config)
     try:
@@ -193,30 +181,7 @@ def subagent_run(task: str, max_iterations: int = 100) -> str:
             on_progress=_on_progress,
         )
         _print_done(tool_counter[0], start_time)
-        # 更新最终状态
-        from team import get_output_engine
-        engine = get_output_engine()
-        if engine:
-            engine.set_subagent(sa_key, {
-                "seq": sa_seq,
-                "task": task_snippet,
-                "_start": start_time,
-                "tool_uses": tool_counter[0],
-                "status": "completed",
-            })
         return result
-    except Exception:
-        from team import get_output_engine
-        engine = get_output_engine()
-        if engine:
-            engine.set_subagent(sa_key, {
-                "seq": sa_seq,
-                "task": task_snippet,
-                "_start": start_time,
-                "tool_uses": tool_counter[0],
-                "status": "failed",
-            })
-        raise
     finally:
         # 无论成功/失败/取消都回收自己的槽位，避免状态栏残留死条目
         from team import get_output_engine
