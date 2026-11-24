@@ -593,6 +593,10 @@ class OutputEngine:
 
                 cell = Text()
                 cell.append(f"{symbol} {wid}", style="bold yellow")
+                # 未读消息角标：只在有积压时出现，不占固定宽度，避免状态栏抖动
+                _inbox_n = info.get("inbox", 0)
+                if _inbox_n:
+                    cell.append(f" (+{_inbox_n})", style=JifyTheme.GREEN)
                 if task:
                     cell.append(f"  {task}", style=JifyTheme.SUBTLE)
                 cell.append("\n", style=JifyTheme.SUBTLE)

@@ -15,7 +15,7 @@ from tools.builtin.skill_experience import skill_experience_add
 from tools.builtin.vuln_verify import vuln_verify
 # from tools.builtin.workflow_tool import run_workflow # workflow 暂时摒弃
 from tools.builtin.subagent import subagent_run
-from tools.builtin.team_tools import team_delegate, team_broadcast, team_delegate_parallel, team_status, team_add_worker, team_remove_worker
+from tools.builtin.team_tools import team_delegate, team_broadcast, team_delegate_parallel, team_status, team_collect, team_add_worker, team_remove_worker, team_assign_squad, team_leave_squad, team_disband_squad, team_message, team_post, team_wait, team_delegate_async, team_wait_any, team_read
 from tools.builtin.todo_tool import update_todos
 from tools.builtin.session_search import session_search
 # from tools.builtin.memory_tool import memory_search    # 长期记忆暂不启用

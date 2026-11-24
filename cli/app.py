@@ -198,7 +198,9 @@ _cli_session = PromptSession(
 # 基础架构 / 协调工具：不应被自进化视为用户偏好
 _INFRA_TOOLS = {
     "team_delegate", "team_delegate_parallel", "team_broadcast",
-    "team_add_worker", "team_remove_worker", "team_status", "subagent_run",
+    "team_add_worker", "team_remove_worker", "team_status", "team_collect",
+    "team_message", "team_post", "team_wait",
+    "team_delegate_async", "team_wait_any", "subagent_run",
     "update_todos", "mcp_reload", "mcp_list",
     "load_skill", "skill_create",
 }

@@ -230,6 +230,9 @@ def _render_diff(diff: str) -> Text:
             t.append(line, style=JifyTheme.SUBTLE)
         if i < len(lines) - 1:
             t.append("\n")
+    # 结尾补一个换行：调用方会在其后追加分隔线，缺换行会让分隔线粘在最后
+    # 一行 diff 末尾，Rich 折行时连成一条被折断的长线。
+    t.append("\n")
     return t
 
 

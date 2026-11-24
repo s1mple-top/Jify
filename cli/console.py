@@ -315,6 +315,12 @@ class CLIConsole(BaseStreamConsumer):
                 "team_add_worker": "Add Worker",
                 "team_remove_worker": "Delete Worker",
                 "team_status": "Status",
+                "team_collect": "Collect",
+                "team_message": "Message",
+                "team_post": "Post",
+                "team_wait": "Wait",
+                "team_delegate_async": "Delegate Async",
+                "team_wait_any": "Wait Any",
             }.get(name, "Team")
             self._output.queue_output(Text(""))
             self._output.queue_output(Text(f"⚙ {team_label}…", style="bold white"))

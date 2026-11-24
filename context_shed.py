@@ -290,7 +290,9 @@ def shed_tool_outputs(messages, config, notify=None, session_id=None,
     if notify:
         notify(
             f"[compact] 已清理 {len(plan)} 条早期工具结果，"
-            f"节省约 {saved} 字符（原文可 session_search 召回）"
+            f"节省约 {saved} 字符（原文可 session_search 召回）\n"
+            f"[compact] Cleared {len(plan)} early tool results, "
+            f"saved ~{saved} chars (recoverable via session_search)"
         )
     return True, saved
 
