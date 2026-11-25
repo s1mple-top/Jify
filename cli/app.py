@@ -67,7 +67,7 @@ SLASH_COMMANDS: Dict[str, str] = {
     "clear": "清除对话历史 (clear history)  —  /clear",
     "help": "显示帮助信息 (show help)  —  /help",
     "hook": "显示hook信息 (show hooks)  —  /hook",
-    "skill": "列出所有可用 skill (list skills)  —  /skill",
+    "skill": "列出所有可用 skill (list skills)  —  /skill | /skill remove <name>",
     "learn": "学习当前会话，沉淀为 skill (learn from session)  —  /learn",
     "jify": "分析当前目录下的项目，生成Jify.md (analyze project)  —  /jify",
     "exit": "退出程序 (exit)  —  /exit",
@@ -778,6 +778,73 @@ def _sync_usage_file() -> None:
         )
 
 
+def _remove_skill(target_name: str) -> List[str]:
+    """删除一个已安装 skill，返回给用户看的消息行。
+
+    在所有 skill 根目录中查找同名（目录名或规范名）skill：
+    命中 0 个 -> 提示未找到；命中多个 -> 拒绝并要求手动处理，避免误删；
+    命中 1 个 -> 校验其直接位于已知根目录后 rmtree，并清理 usage.json。
+    """
+    from tools.skill_paths import canonical_skill_name, skill_roots
+
+    roots = skill_roots()
+    matches: List[Path] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for d in root.iterdir():
+            if not d.is_dir() or not (d / "SKILL.md").is_file():
+                continue
+            if d.name == target_name or canonical_skill_name(d) == target_name:
+                matches.append(d)
+
+    if not matches:
+        return [f"  ⚠ 未找到 skill: {target_name}"]
+
+    if len(matches) > 1:
+        lines = [f"  ✗ {target_name} 在多处重名，请手动删除其一："]
+        lines.extend(f"    • {d}" for d in matches)
+        return lines
+
+    skill_dir = matches[0]
+    # rmtree 前确认目标直接位于已知 skill 根目录下
+    if skill_dir.parent not in roots:
+        return [f"  ✗ 拒绝删除 skill 根目录之外的路径: {skill_dir}"]
+
+    try:
+        shutil.rmtree(skill_dir)
+    except OSError as e:
+        return [f"  ⚠ 删除失败: {e}"]
+
+    _sync_usage_file()
+
+    lines = [f"  ✓ 已删除 skill: {target_name}  ({skill_dir})"]
+    # 自进化沉淀的 skill 还需摘掉 approved 标记，否则 /skill 列表仍会显示它
+    if _forget_approved_skill(target_name):
+        lines.append(f"  ✓ 已从自进化 approved 名单移除: {target_name}")
+    return lines
+
+
+def _forget_approved_skill(name: str) -> bool:
+    """从自进化 skill 的 approved 名单中移除 name，成功移除返回 True。"""
+    path = Path(os.path.expanduser("~")) / ".jify" / "self_evolution" / "skills" / "cli_user.json"
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        approved = set(data.get("approved", []))
+        if name not in approved:
+            return False
+        approved.discard(name)
+        data["approved"] = sorted(approved)
+        path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        return True
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
 def _show_low_usage_warning() -> None:
     """在启动时展示低使用率 skill 提醒"""
     low = _check_low_usage_skills()
@@ -796,7 +863,7 @@ def _show_low_usage_warning() -> None:
             Text(f"   - {name}", style=JifyTheme.ACCENT),
         )
     console.print(
-        Text("   Run /skill to review; delete unused ones to stay organized.", style=JifyTheme.SUBTLE),
+        Text("   Run /skill to review; /skill remove <name> deletes the ones you no longer need.", style=JifyTheme.SUBTLE),
     )
     console.print()
 
@@ -1171,33 +1238,15 @@ def main_loop(think_stream: bool = False, safe_exec: bool = False,
                     divider()
                     continue
                 elif cmd == "skill":
-                    # 子命令: /skill delete <name>
-                    if arg.startswith("delete "):
-                        target_name = arg[7:].strip()
+                    # 子命令: /skill remove <name>（delete 为别名）
+                    sub, _, sub_arg = arg.partition(" ")
+                    if sub.strip() in ("remove", "delete"):
+                        target_name = sub_arg.strip()
                         if not target_name:
-                            meta("  用法: /skill delete <name>")
-                            divider()
-                            continue
-                        suggestion_path = Path(os.path.expanduser("~")) / ".jify" / "self_evolution" / "skills" / "cli_user.json"
-                        if not suggestion_path.exists():
-                            meta(f"  ⚠ 暂无自进化沉淀 skill")
-                            divider()
-                            continue
-                        try:
-                            data = json.loads(suggestion_path.read_text(encoding="utf-8"))
-                            approved = set(data.get("approved", []))
-                            if target_name not in approved:
-                                meta(f"  ⚠ 未找到自进化沉淀 skill: {target_name}")
-                            else:
-                                approved.discard(target_name)
-                                data["approved"] = sorted(approved)
-                                suggestion_path.write_text(
-                                    json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-                                    encoding="utf-8",
-                                )
-                                meta(f"  ✓ 已删除自进化沉淀 skill: {target_name}")
-                        except (json.JSONDecodeError, IOError) as e:
-                            meta(f"  ⚠ 操作失败: {e}")
+                            meta("  用法: /skill remove <name>")
+                        else:
+                            for line in _remove_skill(target_name):
+                                meta(line)
                         divider()
                         continue
 

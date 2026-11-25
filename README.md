@@ -139,6 +139,7 @@ Type `/` in a chat to trigger autocompletion:
 | `/help`         | 显示帮助信息 / Show help                                     |
 | `/hook`         | 显示已加载的 Hook / Show loaded hooks                        |
 | `/skill`        | 列出可用 Skill / List available skills                       |
+| `/skill remove <name>` | 删除已安装 Skill（目录名或 frontmatter 名均可；`delete` 为别名） / Remove an installed skill (by directory or frontmatter name; `delete` is an alias) |
 | `/learn`        | 学习当前对话，沉淀为 Skill / Learn from current chat and distill into a Skill |
 | `/jify`         | 分析当前工作目录(cwd)下的项目，生成 Jify.md / Analyze the project in cwd and generate Jify.md |
 | `/approve <yes\|no>` | 查看/切换工具调用审批模式（`no` 关闭免审批，`yes` 重新开启） / Show or toggle tool-call approval (`no` to disable, `yes` to re-enable) |
