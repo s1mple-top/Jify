@@ -190,6 +190,13 @@ team_wait_any 返回 status="stopped" 时，含义是该任务收到队友的 st
 不是它叫停了别人，也不是失败。成果在 stopped_by（谁拿到的，结构化字段）与
 stop_reason（stop 原文，自动透传）里；要细节再去 team_collect 取该发送者单独写给
 leader 的 conclusion，不要重试，也不要等它产出新内容。
+
+## exec 超时（硬性）
+exec 软超时（默认 30s）后不会杀掉命令，而是自动转入后台继续运行，返回里带
+timed_out / background / log_path / pid / partial_output。
+看到 background=true 时【绝对不要重跑同一条命令】，用 `exec cat <log_path>` 读进展，
+两次读取之间用 `exec sleep 10` 间隔。先看 partial_output，它往往已含关键结果。
+
 ## 历史经验
 {experience}
 ## 用户偏好
